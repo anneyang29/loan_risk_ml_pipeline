@@ -1,0 +1,114 @@
+# ML Pipeline Configuration
+# =========================
+# Version: 1.0.0
+# Last Updated: 2024-04-07
+# Owner: Data Science Team
+#
+# 使用方式:
+#   from utils.config import ConfigManager
+#   config = ConfigManager(Path("config/pipeline_config.yaml"))
+
+version: "1.0.0"
+effective_date: "2024-04-07"
+
+# ============================================
+# 時間區間設定
+# ============================================
+time_period:
+  data_start: "2024-04-01"
+  data_end: "2026-03-31"
+  oot_start: "2025-10-01"
+  train_months: 4
+  monitor_months: 2
+  step_months: 2
+
+# ============================================
+# 特徵定義
+# ============================================
+feature_definition:
+  # 數值特徵（需要 MinMaxScaler）
+  numeric_features_to_scale:
+    - 年齡
+    - 申辦期數
+    - 原申辦金額_log
+    - 車齡_log
+    - 內部往來次數_log
+    - 近半年同業查詢次數_log
+    - 所留市內電話數_log
+
+  # 序位特徵（已編碼）
+  ordinal_features:
+    - 教育程度_序位
+    - 月所得_序位
+    - 年齡組_序位
+
+  # 二元特徵
+  binary_features:
+    - 性別_二元
+    - 婚姻狀況_二元
+    - 動產設定
+    - 車齡_是否缺失
+    - 車齡_異常旗標
+    - 教育程度_是否缺失
+    - 月所得_是否缺失
+    - 內部往來次數_是否特殊值
+    - 近半年同業查詢次數_是否缺失
+
+  # 高基數類別（Frequency Encoding）
+  high_cardinality_features:
+    - 居住地
+    - 職業說明
+    - 廠牌車型
+
+  # 目標變數
+  target_column: 授信結果_二元
+
+  # Key 欄位
+  key_columns:
+    - 案件編號
+    - 進件日
+    - 進件年月
+
+# ============================================
+# 資料品質閾值
+# ============================================
+data_quality:
+  # NULL 比例閾值
+  null_ratio_thresholds:
+    案件編號: 0.0
+    進件日: 0.0
+    授信結果: 0.0
+    年齡: 0.05
+    性別: 0.10
+    教育程度: 0.50
+    月所得: 0.30
+    車齡: 0.50
+    default: 0.30
+
+  # 資料筆數閾值
+  row_count:
+    min_total_rows: 1000
+    min_monthly_rows: 50
+    max_duplicate_ratio: 0.01
+
+  # 類別漂移閾值
+  category_drift:
+    max_unseen_ratio: 0.05
+    max_psi: 0.25
+
+  # Label 分布閾值
+  label:
+    min_positive_ratio: 0.05
+    max_positive_ratio: 0.95
+
+# ============================================
+# 路徑設定
+# ============================================
+paths:
+  raw_data: data/raw
+  bronze: datamart/bronze
+  silver: datamart/silver
+  gold: datamart/gold
+  artifacts: datamart/gold/artifacts
+  reports: datamart/gold/reports
+  audit: datamart/gold/audit

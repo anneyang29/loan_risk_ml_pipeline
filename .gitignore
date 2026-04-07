@@ -1,0 +1,143 @@
+# ============================================
+# Python
+# ============================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# ============================================
+# Virtual Environments
+# ============================================
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+.conda/
+conda-env/
+
+# ============================================
+# IDE / Editor
+# ============================================
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+*.sublime-project
+*.sublime-workspace
+
+# ============================================
+# Jupyter Notebook
+# ============================================
+.ipynb_checkpoints/
+*.ipynb_checkpoints/
+
+# ============================================
+# Spark / PySpark
+# ============================================
+spark-warehouse/
+metastore_db/
+derby.log
+*.crc
+
+# ============================================
+# Data Files (大型資料不進版控)
+# ============================================
+# 原始資料
+data/raw/*.csv
+data/raw/*.xlsx
+data/raw/*.xls
+data/raw/*.parquet
+data/*.xlsx
+data/*.csv
+
+# Datamart 輸出（可重新生成）
+datamart/bronze/
+datamart/silver/
+datamart/gold/
+
+# ============================================
+# Model Artifacts
+# ============================================
+models/*.pkl
+models/*.joblib
+models/*.h5
+models/*.pt
+models/*.pth
+models/*.onnx
+
+# ============================================
+# Logs & Reports
+# ============================================
+logs/
+*.log
+reports/
+
+# ============================================
+# Secrets & Credentials
+# ============================================
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+secrets/
+credentials/
+config/local.yaml
+config/prod.yaml
+
+# ============================================
+# OS Generated Files
+# ============================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# ============================================
+# Test & Coverage
+# ============================================
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+
+# ============================================
+# Misc
+# ============================================
+*.bak
+*.tmp
+*.temp
+.cache/
