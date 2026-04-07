@@ -55,6 +55,10 @@ conda-env/
 .ipynb_checkpoints/
 *.ipynb_checkpoints/
 
+# Notebook 檔案（不進版控）
+notebooks/*.ipynb
+*.ipynb
+
 # ============================================
 # Spark / PySpark
 # ============================================
@@ -87,21 +91,8 @@ datamart/**/reports/
 # ============================================
 # Model Artifacts
 # ============================================
-# 模型檔案（太大）
-models/**/*.pkl
-models/**/*.joblib
-models/**/*.h5
-models/**/*.pt
-models/**/*.pth
-models/**/*.onnx
-
-# 但保留模型的 metadata（可追蹤）
-!models/**/*_artifact.json
-!models/**/training_report.json
-!models/**/feature_importance.csv
-
-# Audit logs（可重新生成）
-models/audit/
+# 整個 models 資料夾不進版控（模型太大，且可重新訓練）
+models/
 
 # ============================================
 # Logs & Reports
