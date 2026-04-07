@@ -1,8 +1,10 @@
 """
 ML Pipeline - Main Entry Point
 ==============================
-執行完整的 Bronze → Silver → Gold Pipeline
+執行完整的 Bronze → Silver → Gold Data Pipeline
 支援企業級資料治理功能
+
+For model training, use train.py instead.
 
 Usage:
     python main.py                    # 執行全部（含 validation + artifacts）
@@ -49,11 +51,15 @@ def parse_args():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-    python main.py                          # 執行全部 pipeline
+    python main.py                          # 執行全部 data pipeline
     python main.py silver gold              # 只執行 Silver + Gold
     python main.py --simple                 # 簡化模式（不含 validation）
     python main.py --config config/dev.yaml # 使用指定設定檔
     python main.py --no-drift               # 不執行漂移檢查
+    
+For model training:
+    python train.py                         # 訓練模型
+    python train.py --calibration sigmoid   # 使用 sigmoid calibration
         """
     )
     
@@ -215,7 +221,11 @@ def main():
                 logger.info(f"  - {name}: {path}")
         
         logger.info("\n" + "=" * 70)
-        logger.info(f" Pipeline 執行完成！ (Run ID: {run_id})")
+        logger.info(f" Data Pipeline 執行完成！ (Run ID: {run_id})")
+        logger.info("=" * 70)
+        logger.info("")
+        logger.info("下一步：執行模型訓練")
+        logger.info("  python train.py --run-id " + run_id)
         logger.info("=" * 70)
         
     finally:

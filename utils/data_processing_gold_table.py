@@ -31,7 +31,8 @@ from .config import (
 from .schema_validation import DataValidator, ValidationReport
 from .transformation_artifacts import (
     ArtifactManager, TransformationPackage,
-    ScalerArtifact, FrequencyEncodingArtifact
+    ScalerArtifact, FrequencyEncodingArtifact,
+    save_transformation_artifacts, load_transformation_artifacts
 )
 from .monitoring import (
     DriftMonitor, DriftReport, AuditLogger, AuditRecord,
@@ -160,44 +161,42 @@ def define_rolling_windows(
 def apply_frequency_encoding(
     df_dev: DataFrame,
     df_oot: DataFrame,
-    columns: List[str]
+    columns: List[str],
+    artifact_manager: ArtifactManager = None,
+    freq_artifact: FrequencyEncodingArtifact = None
 ) -> Tuple[DataFrame, DataFrame, List[str]]:
     """
     對高基數類別欄位做 Frequency Encoding
+    
+    使用 ArtifactManager 統一處理，確保 train/inference 一致性
     
     Args:
         df_dev: Development DataFrame
         df_oot: OOT DataFrame
         columns: 要編碼的欄位列表
+        artifact_manager: ArtifactManager 實例（可選）
+        freq_artifact: 已計算好的 FrequencyEncodingArtifact（可選）
         
     Returns:
         (df_dev, df_oot, frequency_feature_names)
     """
-    frequency_features = []
+    # 使用 ArtifactManager
+    if artifact_manager is None:
+        artifact_manager = ArtifactManager()
+    
+    # 如果沒有提供 artifact，則計算
+    if freq_artifact is None:
+        freq_artifact = artifact_manager.compute_frequency_artifact(df_dev, columns)
+    
+    # 套用 frequency encoding
+    df_dev = artifact_manager.apply_frequency_encoding(df_dev, freq_artifact, columns)
+    df_oot = artifact_manager.apply_frequency_encoding(df_oot, freq_artifact, columns)
+    
+    # 取得 frequency 欄位名稱
+    frequency_features = [f"{col}_頻率" for col in columns if col in df_dev.columns]
     
     for col in columns:
         if col in df_dev.columns:
-            # 計算 Development 中每個類別的頻率
-            freq_df = df_dev.groupBy(col).count()
-            total = df_dev.count()
-            freq_col_name = f"{col}_頻率"
-            
-            freq_df = freq_df.withColumn(
-                freq_col_name,
-                F.col("count") / F.lit(total)
-            ).select(col, freq_col_name)
-            
-            # Join 回 df_dev 和 df_oot
-            df_dev = df_dev.join(freq_df, on=col, how="left")
-            df_oot = df_oot.join(freq_df, on=col, how="left")
-            
-            # OOT 中未見過的類別，頻率設為 0
-            df_oot = df_oot.withColumn(
-                freq_col_name,
-                F.coalesce(F.col(freq_col_name), F.lit(0.0))
-            )
-            
-            frequency_features.append(freq_col_name)
             logger.info(f"✓ {col} 完成 Frequency Encoding")
     
     return df_dev, df_oot, frequency_features
@@ -281,53 +280,41 @@ def create_cross_features(
 def apply_minmax_scaling(
     df_dev: DataFrame,
     df_oot: DataFrame,
-    columns: List[str]
-) -> Tuple[DataFrame, DataFrame, List[str], Dict]:
+    columns: List[str],
+    artifact_manager: ArtifactManager = None
+) -> Tuple[DataFrame, DataFrame, List[str], ScalerArtifact]:
     """
     MinMax 標準化（用 Development 的 min/max 套用到 OOT）
     
+    使用 ArtifactManager 統一處理，確保 train/inference 一致性
+    
+    Args:
+        df_dev: Development DataFrame
+        df_oot: OOT DataFrame  
+        columns: 要標準化的欄位列表
+        artifact_manager: ArtifactManager 實例（可選）
+        
     Returns:
-        (df_dev, df_oot, scaled_feature_names, scale_stats)
+        (df_dev, df_oot, scaled_feature_names, scaler_artifact)
     """
-    scale_stats = {}
-    scaled_features = []
+    # 使用 ArtifactManager 計算 scaler 參數
+    if artifact_manager is None:
+        artifact_manager = ArtifactManager()
     
-    # 計算 Development 的 min/max
-    for col in columns:
-        if col in df_dev.columns:
-            stats = df_dev.select(
-                F.min(col).alias("min_val"),
-                F.max(col).alias("max_val")
-            ).collect()[0]
-            
-            scale_stats[col] = {
-                "min": stats["min_val"] if stats["min_val"] is not None else 0,
-                "max": stats["max_val"] if stats["max_val"] is not None else 1
-            }
+    # 1. 計算 ScalerArtifact（從 Development 資料）
+    scaler_artifact = artifact_manager.compute_scaler_artifact(df_dev, columns)
     
-    # 套用標準化
-    for col in columns:
-        if col in scale_stats and col in df_dev.columns:
-            min_val = scale_stats[col]["min"]
-            max_val = scale_stats[col]["max"]
-            range_val = max_val - min_val if max_val != min_val else 1
-            
-            scaled_col = f"{col}_scaled"
-            
-            df_dev = df_dev.withColumn(
-                scaled_col,
-                (F.col(col) - F.lit(min_val)) / F.lit(range_val)
-            )
-            
-            df_oot = df_oot.withColumn(
-                scaled_col,
-                (F.col(col) - F.lit(min_val)) / F.lit(range_val)
-            )
-            
-            scaled_features.append(scaled_col)
+    # 2. 套用 scaling 到 Development
+    df_dev = artifact_manager.apply_scaler(df_dev, scaler_artifact, columns)
+    
+    # 3. 套用相同的 scaling 到 OOT（使用 Development 的參數）
+    df_oot = artifact_manager.apply_scaler(df_oot, scaler_artifact, columns)
+    
+    # 4. 取得 scaled 欄位名稱
+    scaled_features = [f"{col}_scaled" for col in columns if col in df_dev.columns]
     
     logger.info(f"✓ MinMaxScaler 完成，共 {len(scaled_features)} 個標準化特徵")
-    return df_dev, df_oot, scaled_features, scale_stats
+    return df_dev, df_oot, scaled_features, scaler_artifact
 
 
 def prepare_final_features(
@@ -525,17 +512,19 @@ def run_gold_pipeline(
         # ============================================
         logger.info("Frequency Encoding...")
         
-        # 使用 ArtifactManager 計算並儲存
+        # 使用 ArtifactManager 計算並套用
         artifact_manager = ArtifactManager(config)
         freq_artifact = artifact_manager.compute_frequency_artifact(
             df_dev, 
             config.feature_definition.high_cardinality_features
         )
         
-        # 套用 encoding
+        # 套用 encoding（傳入已計算的 artifact）
         df_dev, df_oot, frequency_features = apply_frequency_encoding(
             df_dev, df_oot, 
-            config.feature_definition.high_cardinality_features
+            config.feature_definition.high_cardinality_features,
+            artifact_manager,
+            freq_artifact
         )
         
         # ============================================
@@ -553,14 +542,9 @@ def run_gold_pipeline(
             cross_features + 
             frequency_features
         )
-        df_dev, df_oot, scaled_features, scale_stats = apply_minmax_scaling(
-            df_dev, df_oot, scale_cols
+        df_dev, df_oot, scaled_features, scaler_artifact = apply_minmax_scaling(
+            df_dev, df_oot, scale_cols, artifact_manager
         )
-        
-        # 建立 Scaler Artifact
-        scaler_artifact = ScalerArtifact()
-        for col, stats in scale_stats.items():
-            scaler_artifact.add_feature(col, stats["min"], stats["max"])
         
         # ============================================
         # 7. 準備最終特徵
@@ -593,11 +577,13 @@ def run_gold_pipeline(
         if save_artifacts:
             logger.info("儲存 Transformation Artifacts...")
             
-            # 建立完整 package
+            # 使用 ArtifactManager 建立完整 package（統一入口）
+            # 注意：我們已經計算好 scaler 和 freq_artifact，直接組裝
             package = TransformationPackage(
                 run_id=run_id,
                 scaler=scaler_artifact,
                 frequency_encoding=freq_artifact,
+                ordinal_encoding=artifact_manager.compute_ordinal_artifact(config),
                 feature_list=scaled_features + 
                              config.feature_definition.ordinal_features + 
                              config.feature_definition.binary_features,
@@ -617,10 +603,11 @@ def run_gold_pipeline(
                     "end": str(date_range["max_date"])
                 }
             
-            # 儲存
+            # 使用統一的儲存函數
             artifacts_path.mkdir(parents=True, exist_ok=True)
-            package.save(artifacts_path)
+            artifact_paths = save_transformation_artifacts(package, artifacts_path)
             output_paths["artifacts"] = artifacts_path
+            output_paths["artifact_files"] = artifact_paths
             
             logger.info(f"✓ Artifacts 儲存至: {artifacts_path}")
         
@@ -715,7 +702,7 @@ if __name__ == "__main__":
     output_paths = run_gold_pipeline(project_root)
     
     logger.info("=" * 60)
-    logger.info("🎉 Gold Layer 完成！")
+    logger.info(" Gold Layer 完成！")
     logger.info("=" * 60)
     logger.info("輸出檔案：")
     for name, path in output_paths.items():

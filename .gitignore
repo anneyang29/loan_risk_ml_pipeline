@@ -73,21 +73,35 @@ data/raw/*.xls
 data/raw/*.parquet
 data/*.xlsx
 data/*.csv
+data/*.xls
 
 # Datamart 輸出（可重新生成）
 datamart/bronze/
 datamart/silver/
 datamart/gold/
 
+# Audit logs（可重新生成）
+datamart/**/audit/
+datamart/**/reports/
+
 # ============================================
 # Model Artifacts
 # ============================================
-models/*.pkl
-models/*.joblib
-models/*.h5
-models/*.pt
-models/*.pth
-models/*.onnx
+# 模型檔案（太大）
+models/**/*.pkl
+models/**/*.joblib
+models/**/*.h5
+models/**/*.pt
+models/**/*.pth
+models/**/*.onnx
+
+# 但保留模型的 metadata（可追蹤）
+!models/**/*_artifact.json
+!models/**/training_report.json
+!models/**/feature_importance.csv
+
+# Audit logs（可重新生成）
+models/audit/
 
 # ============================================
 # Logs & Reports
@@ -141,3 +155,17 @@ coverage.xml
 *.tmp
 *.temp
 .cache/
+
+# ============================================
+# Transformation Artifacts (可重新生成)
+# ============================================
+artifacts/
+transformation_artifacts/
+
+# ============================================
+# Large Files (Git LFS 或完全忽略)
+# ============================================
+*.zip
+*.tar.gz
+*.7z
+*.rar

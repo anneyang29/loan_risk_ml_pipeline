@@ -3,12 +3,21 @@ Utils Package
 =============
 Bronze / Silver / Gold 資料處理函數
 企業級資料治理模組
+模型訓練模組
 """
 
 # Core pipelines
 from .data_processing_bronze_table import run_bronze_pipeline
 from .data_processing_silver_table import run_silver_pipeline
 from .data_processing_gold_table import run_gold_pipeline
+
+# Model Training
+from .model_train import (
+    run_model_training,
+    CreditScoringModelTrainer,
+    ModelArtifact,
+    prepare_training_data,
+)
 
 # Configuration
 from .config import (
@@ -62,6 +71,11 @@ __all__ = [
     "run_bronze_pipeline",
     "run_silver_pipeline",
     "run_gold_pipeline",
+    # Model Training
+    "run_model_training",
+    "CreditScoringModelTrainer",
+    "ModelArtifact",
+    "prepare_training_data",
     # Config
     "ConfigManager",
     "default_config",

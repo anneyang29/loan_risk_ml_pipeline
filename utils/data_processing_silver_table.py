@@ -28,6 +28,7 @@ from .schema_validation import (
     check_schema_compatibility
 )
 from .monitoring import AuditLogger, AuditRecord
+from .transformation_artifacts import ArtifactManager, OrdinalEncodingArtifact
 
 # 設定 logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -91,7 +92,7 @@ def clean_category_columns(df: DataFrame) -> DataFrame:
     """清理類別欄位（去空白、空字串轉 NULL）"""
     category_cols = [
         "性別", "教育程度", "婚姻狀況", "職業說明", 
-        "居住地", "廠牌車型", "動產設定", "授信結果", "成功案例"
+        "居住地", "廠牌車型", "動產設定", "授信結果"
     ]
     
     for c in category_cols:
@@ -101,6 +102,11 @@ def clean_category_columns(df: DataFrame) -> DataFrame:
                 c,
                 F.when((F.col(c) == "") | (F.col(c) == " "), None).otherwise(F.col(c))
             )
+    
+    # 移除「成功案例」欄位（若存在）
+    if "成功案例" in df.columns:
+        df = df.drop("成功案例")
+        logger.info("已移除「成功案例」欄位")
     
     return df
 
@@ -217,51 +223,51 @@ def encode_binary_features(df: DataFrame) -> DataFrame:
     return df
 
 
-def encode_education_ordinal(df: DataFrame) -> DataFrame:
-    """教育程度序位編碼：0-6"""
-    df = df.withColumn(
-        "教育程度_序位",
-        F.when(F.col("教育程度") == "Missing", 0)
-         .when(F.col("教育程度") == "其他", 1)
-         .when(F.col("教育程度") == "國中", 2)
-         .when(F.col("教育程度") == "高中", 3)
-         .when(F.col("教育程度") == "專科", 4)
-         .when(F.col("教育程度") == "大學", 5)
-         .when(F.col("教育程度") == "碩士以上", 6)
-         .otherwise(0)
-    )
+def encode_education_ordinal(df: DataFrame, config: ConfigManager = None) -> DataFrame:
+    """
+    教育程度序位編碼
+    
+    使用 config 中定義的映射，確保與 transformation_artifacts 一致
+    """
+    if config is None:
+        config = default_config
+    
+    # 從 config 取得映射
+    edu_mapping = config.feature_encoding.education_ordinal_mapping
+    
+    # 建立 mapping expression
+    mapping_expr = F.lit(0)  # 預設值
+    for edu_level, ordinal in edu_mapping.items():
+        mapping_expr = F.when(
+            F.col("教育程度") == F.lit(edu_level), F.lit(ordinal)
+        ).otherwise(mapping_expr)
+    
+    df = df.withColumn("教育程度_序位", mapping_expr)
     return df
 
 
-def encode_income_ordinal(df: DataFrame) -> DataFrame:
-    """月所得序位編碼：0-14"""
-    df = df.withColumn(
-        "月所得_序位",
-        F.when(F.col("月所得") == "Missing", 0)
-         # 細分區間
-         .when(F.col("月所得") == "~20,000", 1)
-         .when(F.col("月所得") == "20,000~24,999", 2)
-         .when(F.col("月所得") == "25,000~29,999", 3)
-         .when(F.col("月所得") == "30,000~34,999", 4)
-         .when(F.col("月所得") == "35,000~39,999", 5)
-         .when(F.col("月所得") == "40,000~44,999", 6)
-         .when(F.col("月所得") == "45,000~49,999", 7)
-         .when(F.col("月所得") == "50,000~54,999", 8)
-         .when(F.col("月所得") == "55,000~59,999", 9)
-         .when(F.col("月所得") == "60,000~64,999", 10)
-         .when(F.col("月所得") == "65,000~69,999", 11)
-         .when(F.col("月所得") == "70,000~74,999", 12)
-         .when(F.col("月所得") == "75,000~79,999", 13)
-         .when(F.col("月所得") == "80,000~", 14)
-         # 粗分區間
-         .when(F.col("月所得") == "20,000~29,999", 2)
-         .when(F.col("月所得") == "30,000~39,999", 4)
-         .when(F.col("月所得") == "40,000~49,999", 6)
-         .when(F.col("月所得") == "50,000~59,999", 8)
-         .when(F.col("月所得") == "60,000~69,999", 10)
-         .when(F.col("月所得") == "70,000~79,999", 12)
-         .otherwise(0)
-    )
+def encode_income_ordinal(df: DataFrame, config: ConfigManager = None) -> DataFrame:
+    """
+    月所得序位編碼
+    
+    使用 config 中定義的映射，確保與 transformation_artifacts 一致
+    """
+    if config is None:
+        config = default_config
+    
+    # 合併細分與粗分映射
+    income_mapping = {}
+    income_mapping.update(config.feature_encoding.income_ordinal_mapping_detailed)
+    income_mapping.update(config.feature_encoding.income_ordinal_mapping_coarse)
+    
+    # 建立 mapping expression
+    mapping_expr = F.lit(0)  # 預設值
+    for income_level, ordinal in income_mapping.items():
+        mapping_expr = F.when(
+            F.col("月所得") == F.lit(income_level), F.lit(ordinal)
+        ).otherwise(mapping_expr)
+    
+    df = df.withColumn("月所得_序位", mapping_expr)
     
     # 缺失旗標
     df = df.withColumn(
@@ -272,8 +278,19 @@ def encode_income_ordinal(df: DataFrame) -> DataFrame:
     return df
 
 
-def encode_age_group(df: DataFrame) -> DataFrame:
-    """年齡組編碼"""
+def encode_age_group(df: DataFrame, config: ConfigManager = None) -> DataFrame:
+    """
+    年齡組編碼
+    
+    使用 config 中定義的映射，確保一致性
+    """
+    if config is None:
+        config = default_config
+    
+    # 從 config 取得年齡組映射
+    age_mapping = config.feature_encoding.age_group_mapping
+    
+    # 年齡組分類
     df = df.withColumn(
         "年齡組",
         F.when(F.col("年齡") < 21, "~20")
@@ -284,16 +301,14 @@ def encode_age_group(df: DataFrame) -> DataFrame:
          .otherwise("61~")
     )
     
-    df = df.withColumn(
-        "年齡組_序位",
-        F.when(F.col("年齡組") == "~20", 0)
-         .when(F.col("年齡組") == "21-30", 1)
-         .when(F.col("年齡組") == "31-40", 2)
-         .when(F.col("年齡組") == "41-50", 3)
-         .when(F.col("年齡組") == "51-60", 4)
-         .when(F.col("年齡組") == "61~", 5)
-         .otherwise(None)
-    )
+    # 從 config 取得序位映射
+    ordinal_mapping_expr = F.lit(0)
+    for age_group, info in age_mapping.items():
+        ordinal_mapping_expr = F.when(
+            F.col("年齡組") == F.lit(age_group), F.lit(info["ordinal"])
+        ).otherwise(ordinal_mapping_expr)
+    
+    df = df.withColumn("年齡組_序位", ordinal_mapping_expr)
     
     return df
 
@@ -473,9 +488,9 @@ def run_silver_pipeline(
         df = fill_missing_with_label(df)
         df = process_car_age(df)
         df = encode_binary_features(df)
-        df = encode_education_ordinal(df)
-        df = encode_income_ordinal(df)
-        df = encode_age_group(df)
+        df = encode_education_ordinal(df, config)  # 使用 config 中的映射
+        df = encode_income_ordinal(df, config)      # 使用 config 中的映射
+        df = encode_age_group(df, config)           # 使用 config 中的映射
         df = process_count_features(df)
         df = apply_log_transform(df)
         
