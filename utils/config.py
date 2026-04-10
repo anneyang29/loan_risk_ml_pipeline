@@ -83,9 +83,9 @@ class SchemaContract:
     # 允許的類別值
     allowed_values: Dict[str, List[str]] = field(default_factory=lambda: {
         "性別": ["男", "女", None, "Missing"],
-        "婚姻狀況": ["已婚", "未婚", "離婚", None, "Missing"],
+        "婚姻狀況": ["已婚", "未婚", "離婚", "同居", None, "Missing"],
         "教育程度": [
-            "國中", "高中", "專科", "大學", "碩士以上", "其他", 
+            "國中", "高中", "專科", "大學", "碩士", "碩士以上", "博士以上", "其他", 
             None, "Missing"
         ],
         "授信結果": [
@@ -93,7 +93,7 @@ class SchemaContract:
             # 其他可能的狀態（需要監控）
             "PEND(審核中)", "CANCEL(取消)",
         ],
-        "動產設定": ["Y", "N", None],
+        "動產設定": ["Y", "N", "0", "1", None],
     })
     
     # 數值欄位範圍
@@ -168,7 +168,9 @@ class FeatureEncodingConfig:
         "高中": 3,
         "專科": 4,
         "大學": 5,
+        "碩士": 6,
         "碩士以上": 6,
+        "博士以上": 7,
     })
     
     # 月所得序位映射（細分區間）

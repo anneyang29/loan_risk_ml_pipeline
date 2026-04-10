@@ -188,9 +188,13 @@ class SchemaValidator:
         expected_set = set(expected_columns)
         unexpected = actual_columns - expected_set
         
-        # 排除系統欄位
-        system_columns = {"bronze_load_timestamp", "silver_process_timestamp"}
-        unexpected = unexpected - system_columns
+        # 排除系統欄位和已知要移除的欄位
+        excluded_columns = {
+            "bronze_load_timestamp", 
+            "silver_process_timestamp",
+            "成功案例"  # 此欄位在 Silver Layer 會被移除，不需警告
+        }
+        unexpected = unexpected - excluded_columns
         
         if unexpected:
             error_def = ERROR_CATALOG["SCH003"]

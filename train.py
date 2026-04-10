@@ -4,11 +4,13 @@ Model Training - Entry Point
 XGBoost + Calibration 信用評分模型訓練
 
 Usage:
-    python train.py                           # 使用預設設定
-    python train.py --calibration sigmoid     # 使用 sigmoid calibration
-    python train.py --n-splits 10             # 10-fold CV
-    python train.py --run-id exp_001          # 指定 run ID
-    python train.py --config config/prod.yaml # 使用設定檔
+    python train.py                              # 使用預設設定
+    python train.py --training-date 2026-04-08   # 指定訓練日期（模型版本）
+    python train.py --calibration sigmoid        # 使用 sigmoid calibration
+    python train.py --n-splits 10                # 10-fold CV
+    python train.py --config config/prod.yaml    # 使用設定檔
+    python train.py --compare                    # 比較所有模型
+    python train.py --list-models                # 列出所有模型
 """
 
 import argparse
@@ -19,6 +21,7 @@ from datetime import datetime
 from pyspark.sql import SparkSession
 
 from utils.model_train import run_model_training, CreditScoringModelTrainer
+from utils.model_registry import ModelRegistry
 from utils.config import ConfigManager, CONFIG_VERSION
 
 # 設定 logging
@@ -45,10 +48,12 @@ def parse_args():
         epilog="""
 Examples:
     python train.py                             # 預設設定訓練
+    python train.py --training-date 2026-04-08  # 指定訓練日期
     python train.py --calibration sigmoid       # Sigmoid calibration
     python train.py --n-splits 10               # 10-fold CV
-    python train.py --run-id experiment_001     # 指定實驗 ID
-    python train.py --config config/prod.yaml   # 使用設定檔
+    python train.py --compare                   # 比較所有模型
+    python train.py --list-models               # 列出所有模型
+    python train.py --set-best credit_model_2026_04_08  # 手動設定最佳模型
 
 XGBoost 參數調整:
     python train.py --max-depth 6 --learning-rate 0.03
@@ -57,6 +62,13 @@ XGBoost 參數調整:
     )
     
     # 基本設定
+    parser.add_argument(
+        '--training-date',
+        type=str,
+        default=None,
+        help='訓練日期 (YYYY-MM-DD)，用於模型版本命名'
+    )
+    
     parser.add_argument(
         '--run-id',
         type=str,
@@ -69,6 +81,32 @@ XGBoost 參數調整:
         type=str,
         default=None,
         help='設定檔路徑 (YAML/JSON)'
+    )
+    
+    # Model Registry 操作
+    parser.add_argument(
+        '--list-models',
+        action='store_true',
+        help='列出所有訓練過的模型'
+    )
+    
+    parser.add_argument(
+        '--compare',
+        action='store_true',
+        help='比較所有模型表現'
+    )
+    
+    parser.add_argument(
+        '--set-best',
+        type=str,
+        default=None,
+        help='手動設定最佳模型版本'
+    )
+    
+    parser.add_argument(
+        '--no-auto-best',
+        action='store_true',
+        help='不自動選擇最佳模型'
     )
     
     # Calibration 設定
@@ -152,9 +190,46 @@ def main():
     
     # 專案根目錄
     project_root = Path(__file__).parent
+    model_bank_path = project_root / "model_bank"
     
-    # 生成 run_id
+    # ============================================
+    # Model Registry 操作（不需要訓練）
+    # ============================================
+    if args.list_models or args.compare or args.set_best:
+        registry = ModelRegistry(model_bank_path)
+        
+        if args.list_models:
+            print("\n📦 Models in Registry:")
+            print("-" * 50)
+            for v in registry.list_models():
+                r = registry.records[v]
+                status = []
+                if r.is_best:
+                    status.append("⭐ BEST")
+                if r.is_production:
+                    status.append("🚀 PROD")
+                status_str = f" {' '.join(status)}" if status else ""
+                print(f"  {v}{status_str}")
+                print(f"    AUC: {r.auc_test:.4f} | GINI: {r.gini_test:.4f}")
+            print()
+            return
+        
+        if args.compare:
+            print(registry.compare_models())
+            return
+        
+        if args.set_best:
+            registry.set_best_model(args.set_best, reason="Manually selected")
+            print(f"✓ Best model set to: {args.set_best}")
+            return
+    
+    # ============================================
+    # 模型訓練
+    # ============================================
+    
+    # 生成 run_id 和 training_date
     run_id = args.run_id or datetime.now().strftime("%Y%m%d_%H%M%S")
+    training_date = args.training_date or datetime.now().strftime("%Y-%m-%d")
     
     # 載入設定
     config = None
@@ -184,9 +259,11 @@ def main():
     
     # 顯示設定
     logger.info("=" * 70)
-    logger.info("Credit Scoring Model Training")
+    logger.info("🚀 Credit Scoring Model Training")
     logger.info("=" * 70)
     logger.info(f"Config Version: {CONFIG_VERSION}")
+    logger.info(f"Training Date: {training_date}")
+    logger.info(f"Model Version: credit_model_{training_date.replace('-', '_')}")
     logger.info(f"Run ID: {run_id}")
     logger.info(f"Calibration: {args.calibration}")
     logger.info(f"CV Folds: {args.n_splits}")
@@ -206,14 +283,17 @@ def main():
             spark=spark,
             config=config,
             run_id=run_id,
+            training_date=training_date,
             n_splits=args.n_splits,
             calibration_method=args.calibration,
             xgb_params=xgb_params,
+            auto_select_best=not args.no_auto_best,
         )
         
         logger.info("\n" + "=" * 70)
-        logger.info("訓練完成！")
+        logger.info("🎉 訓練完成！")
         logger.info("=" * 70)
+        logger.info(f"模型版本: credit_model_{training_date.replace('-', '_')}")
         logger.info(f"模型儲存於: {model_path}")
         logger.info("")
         logger.info("輸出檔案:")
@@ -222,6 +302,10 @@ def main():
         logger.info(f"  - model_artifact.json    (Metadata)")
         logger.info(f"  - feature_importance.csv (特徵重要性)")
         logger.info(f"  - training_report.json   (訓練報告)")
+        logger.info("")
+        logger.info("Model Registry:")
+        logger.info(f"  - model_bank/registry.json")
+        logger.info(f"  - model_bank/best_model.txt")
         logger.info("=" * 70)
         
     except Exception as e:

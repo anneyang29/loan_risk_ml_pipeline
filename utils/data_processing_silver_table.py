@@ -89,7 +89,7 @@ def convert_numeric_columns(df: DataFrame) -> DataFrame:
 
 
 def clean_category_columns(df: DataFrame) -> DataFrame:
-    """清理類別欄位（去空白、空字串轉 NULL）"""
+    """清理類別欄位（去空白、空字串轉 NULL、同居轉未婚）"""
     category_cols = [
         "性別", "教育程度", "婚姻狀況", "職業說明", 
         "居住地", "廠牌車型", "動產設定", "授信結果"
@@ -103,10 +103,15 @@ def clean_category_columns(df: DataFrame) -> DataFrame:
                 F.when((F.col(c) == "") | (F.col(c) == " "), None).otherwise(F.col(c))
             )
     
-    # 移除「成功案例」欄位（若存在）
-    if "成功案例" in df.columns:
-        df = df.drop("成功案例")
-        logger.info("已移除「成功案例」欄位")
+    # 婚姻狀況：「同居」視為「未婚」
+    if "婚姻狀況" in df.columns:
+        df = df.withColumn(
+            "婚姻狀況",
+            F.when(F.col("婚姻狀況") == "同居", "未婚").otherwise(F.col("婚姻狀況"))
+        )
+        logger.info("已將婚姻狀況「同居」轉換為「未婚」")
+    
+    # 注意：「成功案例」欄位已在 pipeline 開頭移除，此處無需處理
     
     return df
 
@@ -145,20 +150,20 @@ def encode_target(df: DataFrame) -> DataFrame:
 
 
 def handle_education_missing(df: DataFrame) -> DataFrame:
-    """處理教育程度缺失：用職業推斷"""
-    # 缺失旗標
+    """處理教育程度缺失：用職業推斷，並直接更新原欄位"""
+    # 缺失旗標（保留原始缺失資訊）
     df = df.withColumn(
         "教育程度_是否缺失",
         F.when(F.col("教育程度").isNull(), 1).otherwise(0)
     )
     
-    # 用職業推斷補值
+    # 用職業推斷補值，並直接更新「教育程度」欄位
     df = df.withColumn(
-        "教育程度_補值後",
+        "教育程度",
         F.when(F.col("教育程度").isNotNull(), F.col("教育程度"))
          .when(F.col("職業說明").contains("學生(大專生)"), F.lit("大學"))
          .when(F.col("職業說明").contains("學生(高中職生)"), F.lit("高中"))
-         .otherwise(F.col("教育程度"))
+         .otherwise(F.col("教育程度"))  # 仍為 NULL，後續會填 Missing
     )
     
     return df
@@ -424,6 +429,11 @@ def run_silver_pipeline(
         logger.info(f"Bronze 筆數: {initial_count}")
         
         audit_record.row_count_before = initial_count
+        
+        # 先移除「成功案例」欄位（此欄位不應進入模型）
+        if "成功案例" in df.columns:
+            df = df.drop("成功案例")
+            logger.info("已移除「成功案例」欄位（不應進入模型）")
         
         # ============================================
         # 2. Schema Validation（資料契約驗證）

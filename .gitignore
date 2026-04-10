@@ -91,8 +91,21 @@ datamart/**/reports/
 # ============================================
 # Model Artifacts
 # ============================================
-# 整個 models 資料夾不進版控（模型太大，且可重新訓練）
+# 舊的 models 資料夾
 models/
+
+# Model Bank（模型太大，但保留 registry）
+model_bank/**/model.pkl
+model_bank/**/base_model.pkl
+model_bank/**/model.joblib
+model_bank/audit/
+
+# 保留 registry 和 metadata（重要！）
+!model_bank/registry.json
+!model_bank/best_model.txt
+!model_bank/**/model_artifact.json
+!model_bank/**/training_report.json
+!model_bank/**/feature_importance.csv
 
 # ============================================
 # Logs & Reports

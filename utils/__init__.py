@@ -11,14 +11,6 @@ from .data_processing_bronze_table import run_bronze_pipeline
 from .data_processing_silver_table import run_silver_pipeline
 from .data_processing_gold_table import run_gold_pipeline
 
-# Model Training
-from .model_train import (
-    run_model_training,
-    CreditScoringModelTrainer,
-    ModelArtifact,
-    prepare_training_data,
-)
-
 # Configuration
 from .config import (
     ConfigManager,
@@ -64,6 +56,37 @@ from .monitoring import (
     check_unseen_categories,
     compute_feature_statistics,
     calculate_psi,
+    ProductionMonitor,
+    ProductionMonitorConfig,
+    MonitoringResult,
+    check_retrain_trigger,
+)
+
+# Model Registry
+from .model_registry import (
+    ModelRecord,
+    ModelRegistry,
+    RollingTrainedModelRecord,
+    ExtendedModelRegistry,
+    load_best_model_name,
+)
+
+# Rolling Training
+from .rolling_trainer import (
+    RollingTrainer,
+    WindowDefinition,
+    CycleResult,
+    StrategyResult,
+    ZoneSummary,
+    TimeBasedCV,
+    run_rolling_training,
+    aggregate_rolling_results,
+    select_champion_strategy,
+    retrain_final_champion,
+    infer_on_oot,
+    assign_score_zone,
+    evaluate_zone_performance,
+    generate_retraining_window,
 )
 
 __all__ = [
@@ -71,11 +94,6 @@ __all__ = [
     "run_bronze_pipeline",
     "run_silver_pipeline",
     "run_gold_pipeline",
-    # Model Training
-    "run_model_training",
-    "CreditScoringModelTrainer",
-    "ModelArtifact",
-    "prepare_training_data",
     # Config
     "ConfigManager",
     "default_config",
@@ -111,4 +129,29 @@ __all__ = [
     "check_unseen_categories",
     "compute_feature_statistics",
     "calculate_psi",
+    "ProductionMonitor",
+    "ProductionMonitorConfig",
+    "MonitoringResult",
+    "check_retrain_trigger",
+    # Model Registry
+    "ModelRecord",
+    "ModelRegistry",
+    "RollingTrainedModelRecord",
+    "ExtendedModelRegistry",
+    "load_best_model_name",
+    # Rolling Training
+    "RollingTrainer",
+    "WindowDefinition",
+    "CycleResult",
+    "StrategyResult",
+    "ZoneSummary",
+    "TimeBasedCV",
+    "run_rolling_training",
+    "aggregate_rolling_results",
+    "select_champion_strategy",
+    "retrain_final_champion",
+    "infer_on_oot",
+    "assign_score_zone",
+    "evaluate_zone_performance",
+    "generate_retraining_window",
 ]
