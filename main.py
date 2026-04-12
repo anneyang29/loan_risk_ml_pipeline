@@ -319,14 +319,23 @@ def run_monitoring_pipeline(
             upper_threshold=resolved_upper,
         )
 
-        # 儲存結果
+        # 儲存結果（含 threshold metadata）
         output_dir = project_root / "model_bank" / "monitoring"
         output_dir.mkdir(parents=True, exist_ok=True)
 
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         result_path = output_dir / f"monitoring_result_{ts}.json"
+        
+        # 在 monitoring result 中加入 threshold metadata
+        result_dict = result.to_dict()
+        result_dict["threshold_config"] = {
+            "lower_threshold": resolved_lower,
+            "upper_threshold": resolved_upper,
+            "source": threshold_source,
+        }
+        
         with open(result_path, "w", encoding="utf-8") as f:
-            json.dump(result.to_dict(), f, ensure_ascii=False, indent=2)
+            json.dump(result_dict, f, ensure_ascii=False, indent=2)
         print(f"  ✓ Monitoring 結果儲存至: {result_path}")
 
         # Retraining Decision

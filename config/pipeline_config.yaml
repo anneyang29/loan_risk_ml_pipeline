@@ -112,3 +112,49 @@ paths:
   artifacts: datamart/gold/artifacts
   reports: datamart/gold/reports
   audit: datamart/gold/audit
+
+# ============================================
+# Champion Selection 權重
+# ============================================
+champion_selection:
+  weights:
+    w_cv_auc: 0.10           # CV AUC（基礎校驗，降低權重）
+    w_monitor_auc: 0.20      # Monitor AUC（OOT 表現）
+    w_monitor_f1_reject: 0.35 # Monitor F1_reject（核心指標，最高權重）
+    w_monitor_ks: 0.15       # Monitor KS（區分力）
+    w_stability_penalty: 0.20 # 穩定性懲罰（加重）
+
+# ============================================
+# Business Constraints（Phase 3 Threshold Policy）
+# ============================================
+business_constraints:
+  hard_constraints:
+    max_manual_review_ratio: 0.15   # 人工審核不得超過 15%
+    min_auto_decision_rate: 0.85    # 自動決策率至少 85%
+    min_low_zone_ratio: 0.02        # low zone 至少 2%
+  soft_targets:
+    min_high_zone_precision: 0.95   # 高區核准精確度目標
+    min_low_zone_reject_precision: 0.70  # 低區婉拒精確度目標
+    target_auto_decision_rate: 0.90 # 理想自動決策率
+  scoring_weights:
+    w_precision: 0.40       # 精確度在 threshold score 中的權重
+    w_auto_rate: 0.35       # 自動決策率權重
+    w_zone_balance: 0.25    # 區間平衡性權重
+
+# ============================================
+# Conservative Fine-Tuning
+# ============================================
+tuning:
+  enable_tuning: true
+  calibration_methods:
+    - isotonic
+    - sigmoid
+    - none
+  tuning_weights:
+    w_holdout_f1_reject: 0.25     # 最高權重：reject detection
+    w_monitor_f1_reject: 0.15
+    w_holdout_brier: 0.15         # calibration（越低越好）
+    w_monitor_brier: 0.10
+    w_holdout_auc: 0.10
+    w_monitor_auc: 0.10
+    w_stability_penalty: 0.15    # 穩定性懲罰

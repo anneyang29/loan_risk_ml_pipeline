@@ -87,7 +87,10 @@ import xgboost as xgb
 from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql import functions as F
 
-from .config import ConfigManager, default_config, CONFIG_VERSION
+from .config import (
+    ConfigManager, default_config, CONFIG_VERSION,
+    BusinessConstraintConfig, ChampionSelectionConfig, TuningConfig
+)
 
 # 設定 logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -232,6 +235,9 @@ class StrategyResult:
     # Overall score (for ranking)
     overall_score: float = 0.0
     
+    # Ranking reason (traceability)
+    ranking_reason: str = ""
+    
     # Individual cycle results
     cycle_results: List[CycleResult] = field(default_factory=list)
     
@@ -307,6 +313,13 @@ class ThresholdPolicyResult:
     # 預期效能
     expected_precision_high: float = 0.0  # 高區域的核准精確度
     expected_precision_low: float = 0.0   # 低區域的婉拒精確度
+    
+    # Composite threshold score (Phase 3 用於排名)
+    threshold_score: float = 0.0
+    
+    # 是否滿足 business constraints
+    passes_hard_constraints: bool = False
+    constraint_violations: List[str] = field(default_factory=list)
     
     def to_dict(self) -> Dict:
         return asdict(self)
@@ -394,12 +407,21 @@ class DiagnosticsSummary:
         # 判斷 Calibration 問題：monitor Brier 是 train 的 2 倍以上
         if self.train_brier > 0 and self.avg_monitor_brier > 0:
             brier_ratio = self.avg_monitor_brier / self.train_brier
-            self.has_calibration_issue = brier_ratio > 2.0
+            self.has_calibration_issue = bool(brier_ratio > 2.0)
         
         # 判斷 Reject detection 問題
         # F1_reject < 0.35 且 holdout F1_reject < 0.45 → 模型幾乎無法辨識 reject
         if self.final_holdout_f1_reject > 0:
-            self.has_reject_detection_issue = self.final_holdout_f1_reject < 0.45
+            self.has_reject_detection_issue = bool(self.final_holdout_f1_reject < 0.45)
+        
+        # 確保所有 boolean / float 欄位為 Python 原生型別（避免 numpy.bool_ / numpy.float64 導致 JSON 序列化失敗）
+        self.is_overfitting = bool(self.is_overfitting)
+        self.has_calibration_issue = bool(self.has_calibration_issue)
+        self.has_reject_detection_issue = bool(self.has_reject_detection_issue)
+        self.gap_train_vs_monitor_auc = float(self.gap_train_vs_monitor_auc)
+        self.gap_train_vs_holdout_auc = float(self.gap_train_vs_holdout_auc)
+        self.gap_monitor_vs_holdout_auc = float(self.gap_monitor_vs_holdout_auc)
+        self.gap_train_vs_monitor_brier = float(self.gap_train_vs_monitor_brier)
     
     def to_dict(self) -> Dict:
         return asdict(self)
@@ -620,6 +642,12 @@ class CandidateModels:
     
     @staticmethod
     def get_xgboost(scale_pos_weight: float = 1.0) -> xgb.XGBClassifier:
+        """
+        注意：early_stopping_rounds 不在此處設定。
+        因為 CalibratedClassifierCV 等 sklearn wrapper 內部 fit 時不會傳 eval_set，
+        若模型自帶 early_stopping_rounds 會直接報錯。
+        early stopping 改由呼叫端在 fit() 時手動設定（見 _train_window / _run_time_based_cv）。
+        """
         return xgb.XGBClassifier(
             n_estimators=300,         # ← 增加（原 200），搭配更低的 learning_rate
             max_depth=3,              # ← 降低（原 5），淺樹 = 更強泛化
@@ -631,11 +659,9 @@ class CandidateModels:
             reg_lambda=5.0,           # ← 提高（原 1.0），L2 正則化
             gamma=1.0,                # ← 新增，節點切分最小 gain 門檻
             max_delta_step=1,         # ← 新增，限制葉節點權重變化（對 imbalance 有幫助）
-            early_stopping_rounds=30, # ← 新增，連續 30 輪無改善即停止
             scale_pos_weight=scale_pos_weight,
             objective='binary:logistic',
             eval_metric='auc',
-            use_label_encoder=False,
             random_state=RANDOM_STATE,
             n_jobs=-1
         )
@@ -938,6 +964,90 @@ def evaluate_threshold_grid(
     return results
 
 
+def score_threshold_policy(
+    results: List[ThresholdPolicyResult],
+    constraints: BusinessConstraintConfig = None
+) -> List[ThresholdPolicyResult]:
+    """
+    對 threshold 組合進行 business constraint 過濾 + composite scoring
+    
+    流程：
+    1. Hard Constraint 過濾：不符合的標記 passes_hard_constraints=False
+    2. Composite Scoring：對每個組合計算 threshold_score
+    3. 回傳按 threshold_score 排序的結果
+    
+    Scoring 公式:
+      threshold_score = w_precision * precision_component
+                      + w_auto_rate * auto_rate_component
+                      + w_zone_balance * zone_balance_component
+    
+    其中：
+    - precision_component = (precision_high + precision_low) / 2
+    - auto_rate_component = auto_decision_rate（越高越好）
+    - zone_balance_component = 1 - |high_ratio - target|（避免極端分布）
+    """
+    if constraints is None:
+        constraints = BusinessConstraintConfig()
+    
+    for r in results:
+        # ── 1. Hard Constraint Check ──
+        violations = []
+        
+        if r.manual_review_load > constraints.max_manual_review_ratio:
+            violations.append(
+                f"manual_review={r.manual_review_load:.2%} > max={constraints.max_manual_review_ratio:.2%}"
+            )
+        
+        if r.auto_decision_rate < constraints.min_auto_decision_rate:
+            violations.append(
+                f"auto_decision_rate={r.auto_decision_rate:.2%} < min={constraints.min_auto_decision_rate:.2%}"
+            )
+        
+        if r.low_zone_ratio < constraints.min_low_zone_ratio:
+            violations.append(
+                f"low_zone_ratio={r.low_zone_ratio:.2%} < min={constraints.min_low_zone_ratio:.2%}"
+            )
+        
+        r.constraint_violations = violations
+        r.passes_hard_constraints = (len(violations) == 0)
+        
+        # ── 2. Composite Scoring ──
+        # Precision component: avg of high and low zone precision
+        precision_component = (r.expected_precision_high + r.expected_precision_low) / 2
+        
+        # Auto decision rate component: directly use the rate
+        auto_rate_component = r.auto_decision_rate
+        
+        # Zone balance component:
+        # Penalize if auto_decision_rate deviates too far from target
+        # Also penalize if low_zone_ratio is too small (model lacks reject power)
+        deviation_from_target = abs(r.auto_decision_rate - constraints.target_auto_decision_rate)
+        zone_balance_component = max(0.0, 1.0 - deviation_from_target * 2)
+        
+        # Bonus for having sufficient low zone (reject power)
+        if r.low_zone_ratio >= constraints.min_low_zone_ratio:
+            zone_balance_component += 0.1
+        
+        # Soft target bonus/penalty
+        soft_bonus = 0.0
+        if r.expected_precision_high >= constraints.min_high_zone_precision:
+            soft_bonus += 0.05
+        if r.expected_precision_low >= constraints.min_low_zone_reject_precision:
+            soft_bonus += 0.05
+        
+        r.threshold_score = (
+            constraints.w_precision * precision_component +
+            constraints.w_auto_rate * auto_rate_component +
+            constraints.w_zone_balance * zone_balance_component +
+            soft_bonus
+        )
+    
+    # Sort by: passes_hard_constraints first (True > False), then threshold_score desc
+    results.sort(key=lambda x: (x.passes_hard_constraints, x.threshold_score), reverse=True)
+    
+    return results
+
+
 # ============================================
 # Data Splitter (Phase-Based)
 # ============================================
@@ -1006,11 +1116,13 @@ class FourPhaseTrainer:
         project_root: Path,
         phase_config: PhaseConfig = None,
         imbalance_strategy: str = "scale_weight",
-        random_state: int = RANDOM_STATE
+        random_state: int = RANDOM_STATE,
+        config: ConfigManager = None
     ):
         self.project_root = Path(project_root)
         self.phase_config = phase_config or PhaseConfig()
         self.random_state = random_state
+        self.config = config or default_config
         
         # Paths
         self.gold_path = self.project_root / "datamart" / "gold"
@@ -1043,6 +1155,10 @@ class FourPhaseTrainer:
         # Selected threshold (Phase 3 推薦 → Phase 4 / Monitoring 使用)
         self.selected_lower_threshold: Optional[float] = None
         self.selected_upper_threshold: Optional[float] = None
+        
+        # Tuning state
+        self.tuning_results: Optional[List[Dict]] = None
+        self.tuning_best: Optional[Dict] = None
         
         # Spark session
         self.spark: Optional[SparkSession] = None
@@ -1284,7 +1400,9 @@ class FourPhaseTrainer:
             model = deepcopy(model_template)
             
             # XGBoost: 使用 early stopping 避免過度訓練
+            # early_stopping_rounds 在此手動設定（模型 template 不帶此參數）
             if model_name == 'xgboost' and len(y_monitor) > 0:
+                model.set_params(early_stopping_rounds=30)
                 model.fit(
                     X_train, y_train,
                     eval_set=[(X_monitor, y_monitor)],
@@ -1361,12 +1479,25 @@ class FourPhaseTrainer:
                 )
             
             model = deepcopy(model_template)
-            
+
             if hasattr(model, 'scale_pos_weight'):
                 new_weight = self.imbalance_handler.calculate_scale_pos_weight(y_fold_train)
                 model.set_params(scale_pos_weight=new_weight)
-            
-            model.fit(X_fold_train, y_fold_train)
+
+            # If model is XGBoost, enable early stopping with eval_set.
+            # early_stopping_rounds is NOT set on the model template (to avoid
+            # breaking CalibratedClassifierCV), so we set it here explicitly.
+            is_xgb = isinstance(model, xgb.XGBClassifier)
+
+            if is_xgb:
+                model.set_params(early_stopping_rounds=30)
+                model.fit(
+                    X_fold_train, y_fold_train,
+                    eval_set=[(X_fold_val, y_fold_val)],
+                    verbose=False
+                )
+            else:
+                model.fit(X_fold_train, y_fold_train)
             
             # Validation 保留真實分布
             y_pred_proba = model.predict_proba(X_fold_val)[:, 1]
@@ -1396,8 +1527,24 @@ class FourPhaseTrainer:
         Champion Strategy vs Final Champion Artifact:
         - Champion Strategy: 模型+參數的組合方案
         - Final Champion Artifact: 用該策略在完整資料上訓練的實際模型
+        
+        Scoring 設計理念（V2）：
+        - f1_reject 最高權重（信用風險核心：篩出壞客戶）
+        - stability 懲罰加重（生產穩定性基礎）
+        - KS 提升（區分力比純 AUC 更有業務意義）
+        - CV AUC 降低（基礎校驗，不主導排名）
+        
+        權重來源: ConfigManager.champion_selection (ChampionSelectionConfig)
         """
         logger.info("\n彙總 Rolling Results...")
+        
+        # 讀取 champion selection 權重設定
+        cs_cfg = self.config.champion_selection if hasattr(self.config, 'champion_selection') else ChampionSelectionConfig()
+        
+        logger.info(f"Champion Selection 權重:")
+        logger.info(f"  w_cv_auc={cs_cfg.w_cv_auc}, w_monitor_auc={cs_cfg.w_monitor_auc}, "
+                     f"w_f1_reject={cs_cfg.w_monitor_f1_reject}, w_ks={cs_cfg.w_monitor_ks}, "
+                     f"w_stability_penalty={cs_cfg.w_stability_penalty}")
         
         self.strategy_results = {}
         
@@ -1412,15 +1559,32 @@ class FourPhaseTrainer:
             monitor_ks = [r.monitor_ks for r in cycle_results]
             monitor_brier = [r.monitor_brier for r in cycle_results]
             
-            stability_score = (np.std(cv_aucs) + np.std(monitor_aucs) + np.std(monitor_f1_rejects)) / 3
+            # Stability: 加入 KS std 使穩定性評估更全面
+            stability_score = (
+                np.std(cv_aucs) + 
+                np.std(monitor_aucs) + 
+                np.std(monitor_f1_rejects) + 
+                np.std(monitor_ks)
+            ) / 4
             
+            # Overall score (V2 weights)
             overall_score = (
-                np.mean(cv_aucs) * 0.20 +
-                np.mean(monitor_aucs) * 0.35 +
-                np.mean(monitor_f1_rejects) * 0.30 +
-                np.mean(monitor_ks) * 0.05 -
-                stability_score * 0.10
+                np.mean(cv_aucs) * cs_cfg.w_cv_auc +
+                np.mean(monitor_aucs) * cs_cfg.w_monitor_auc +
+                np.mean(monitor_f1_rejects) * cs_cfg.w_monitor_f1_reject +
+                np.mean(monitor_ks) * cs_cfg.w_monitor_ks -
+                stability_score * cs_cfg.w_stability_penalty
             )
+            
+            # Build ranking reason
+            score_parts = [
+                f"cv_auc={np.mean(cv_aucs):.4f}*{cs_cfg.w_cv_auc}",
+                f"mon_auc={np.mean(monitor_aucs):.4f}*{cs_cfg.w_monitor_auc}",
+                f"f1_rej={np.mean(monitor_f1_rejects):.4f}*{cs_cfg.w_monitor_f1_reject}",
+                f"ks={np.mean(monitor_ks):.4f}*{cs_cfg.w_monitor_ks}",
+                f"stab_penalty={stability_score:.4f}*{cs_cfg.w_stability_penalty}",
+            ]
+            ranking_reason = " + ".join(score_parts[:4]) + " - " + score_parts[4]
             
             strategy = StrategyResult(
                 model_name=model_name,
@@ -1436,6 +1600,7 @@ class FourPhaseTrainer:
                 avg_monitor_brier=float(np.mean(monitor_brier)),
                 stability_score=float(stability_score),
                 overall_score=float(overall_score),
+                ranking_reason=ranking_reason,
                 cycle_results=cycle_results
             )
             
@@ -1444,10 +1609,11 @@ class FourPhaseTrainer:
             logger.info(f"\n{model_name}:")
             logger.info(f"  Avg CV AUC: {strategy.avg_cv_auc:.4f} ± {strategy.std_cv_auc:.4f}")
             logger.info(f"  Avg Monitor AUC: {strategy.avg_monitor_auc:.4f} ± {strategy.std_monitor_auc:.4f}")
-            logger.info(f"  Avg Monitor F1_reject: {strategy.avg_monitor_f1_reject:.4f}")
+            logger.info(f"  Avg Monitor F1_reject: {strategy.avg_monitor_f1_reject:.4f} ± {strategy.std_monitor_f1_reject:.4f}")
             logger.info(f"  Avg Monitor KS: {strategy.avg_monitor_ks:.4f}")
             logger.info(f"  Stability Score: {strategy.stability_score:.4f}")
             logger.info(f"  Overall Score: {strategy.overall_score:.4f}")
+            logger.info(f"  Scoring: {ranking_reason}")
         
         # 選出最佳
         sorted_strategies = sorted(
@@ -1459,20 +1625,365 @@ class FourPhaseTrainer:
         self.champion_strategy = sorted_strategies[0][0]
         
         logger.info("\n" + "=" * 60)
-        logger.info("Champion Strategy Selection")
+        logger.info("Champion Strategy Selection (V2 Scoring)")
         logger.info("=" * 60)
         logger.info(f"選出 Champion: {self.champion_strategy}")
         
         champion = self.strategy_results[self.champion_strategy]
         logger.info(f"  Overall Score: {champion.overall_score:.4f}")
         logger.info(f"  Avg Monitor AUC: {champion.avg_monitor_auc:.4f}")
+        logger.info(f"  Avg Monitor F1_reject: {champion.avg_monitor_f1_reject:.4f}")
+        logger.info(f"  Avg Monitor KS: {champion.avg_monitor_ks:.4f}")
+        logger.info(f"  Stability: {champion.stability_score:.4f}")
+        logger.info(f"  Ranking Reason: {champion.ranking_reason}")
         
         logger.info("\n策略排名:")
         for i, (name, strategy) in enumerate(sorted_strategies):
-            logger.info(f"  {i+1}. {name}: Score={strategy.overall_score:.4f}")
+            marker = " ← Champion" if i == 0 else ""
+            logger.info(f"  {i+1}. {name}: Score={strategy.overall_score:.4f} "
+                        f"(f1_rej={strategy.avg_monitor_f1_reject:.4f}, "
+                        f"ks={strategy.avg_monitor_ks:.4f}, "
+                        f"stab={strategy.stability_score:.4f}){marker}")
         
         return self.champion_strategy
     
+    # ============================================
+    # Conservative Fine-Tuning
+    # ============================================
+    def run_conservative_tuning(
+        self,
+        use_calibration: bool = True
+    ) -> Dict:
+        """
+        保守型 Fine-Tuning
+        
+        在 Phase 1 完成（champion strategy 已選出）後，
+        Phase 2 之前執行。
+        
+        流程：
+        1. 對 xgboost / random_forest 各生成少量候選 config
+        2. 每個 config 跑完整 rolling window（重用 Phase 1 的 window 定義）
+        3. 每個 config × calibration_method 做一次 Phase 2 retraining
+        4. 在 holdout 上評估（但不動 Phase 3/4 的正式流程）
+        5. 用 tuning_weights 排名，選出最佳 config
+        
+        注意：
+        - 不破壞 Phase 1 的 strategy_results
+        - 最後將 best config 設定為新的 champion
+        - tuning 結果存入 self.tuning_results
+        """
+        tuning_cfg = self.config.tuning if hasattr(self.config, 'tuning') else TuningConfig()
+        
+        if not tuning_cfg.enable_tuning:
+            logger.info("Conservative Tuning 已停用，跳過")
+            return {}
+        
+        logger.info("\n" + "=" * 80)
+        logger.info("Conservative Fine-Tuning")
+        logger.info("=" * 80)
+        logger.info(f"XGBoost 候選: {len(tuning_cfg.xgb_candidates)} 組")
+        logger.info(f"Random Forest 候選: {len(tuning_cfg.rf_candidates)} 組")
+        logger.info(f"Calibration 方法: {tuning_cfg.calibration_methods}")
+        
+        # 載入資料
+        dev_df = self.load_development_data()
+        X_dev, y_dev, feature_cols = self._prepare_xy(dev_df)
+        self.feature_names = feature_cols
+        
+        scale_pos_weight = self.imbalance_handler.calculate_scale_pos_weight(y_dev)
+        class_weight = self.imbalance_handler.calculate_class_weight(y_dev)
+        
+        # 載入 holdout 資料（用於 tuning evaluation，不是 Phase 4 正式 holdout）
+        spark = self._get_spark()
+        oot_df = spark.read.parquet(str(self.oot_path)).toPandas()
+        oot_df['進件日'] = pd.to_datetime(oot_df['進件日'])
+        oot_df = oot_df.sort_values('進件日')
+        cutoff_idx = int(len(oot_df) * 2 / 3)
+        tuning_holdout_df = oot_df.iloc[cutoff_idx:].copy()
+        X_holdout, y_holdout, _ = self._prepare_xy(tuning_holdout_df, feature_cols)
+        
+        logger.info(f"Development 資料: {len(y_dev)} 筆")
+        logger.info(f"Tuning Holdout 資料: {len(y_holdout)} 筆")
+        
+        tuning_records = []
+        
+        # ── XGBoost 候選 ──
+        for xgb_cfg in tuning_cfg.xgb_candidates:
+            config_id = xgb_cfg.get("config_id", "xgb_unknown")
+            logger.info(f"\n--- Tuning: {config_id} ---")
+            
+            for cal_method in tuning_cfg.calibration_methods:
+                label = f"{config_id}_{cal_method}"
+                logger.info(f"  Calibration: {cal_method}")
+                
+                try:
+                    record = self._evaluate_tuning_candidate(
+                        model_type="xgboost",
+                        config_id=config_id,
+                        params=xgb_cfg,
+                        calibration_method=cal_method,
+                        X_dev=X_dev, y_dev=y_dev,
+                        X_holdout=X_holdout, y_holdout=y_holdout,
+                        dev_df=dev_df,
+                        scale_pos_weight=scale_pos_weight,
+                        class_weight=class_weight,
+                        feature_cols=feature_cols,
+                        use_calibration=(cal_method != "none"),
+                    )
+                    tuning_records.append(record)
+                    logger.info(f"    holdout_auc={record['holdout_auc']:.4f}, "
+                                f"holdout_f1_reject={record['holdout_f1_reject']:.4f}, "
+                                f"holdout_brier={record['holdout_brier']:.4f}")
+                except Exception as e:
+                    logger.warning(f"    ⚠️ {label} 失敗: {e}")
+        
+        # ── Random Forest 候選 ──
+        for rf_cfg in tuning_cfg.rf_candidates:
+            config_id = rf_cfg.get("config_id", "rf_unknown")
+            logger.info(f"\n--- Tuning: {config_id} ---")
+            
+            for cal_method in tuning_cfg.calibration_methods:
+                label = f"{config_id}_{cal_method}"
+                logger.info(f"  Calibration: {cal_method}")
+                
+                try:
+                    record = self._evaluate_tuning_candidate(
+                        model_type="random_forest",
+                        config_id=config_id,
+                        params=rf_cfg,
+                        calibration_method=cal_method,
+                        X_dev=X_dev, y_dev=y_dev,
+                        X_holdout=X_holdout, y_holdout=y_holdout,
+                        dev_df=dev_df,
+                        scale_pos_weight=scale_pos_weight,
+                        class_weight=class_weight,
+                        feature_cols=feature_cols,
+                        use_calibration=(cal_method != "none"),
+                    )
+                    tuning_records.append(record)
+                    logger.info(f"    holdout_auc={record['holdout_auc']:.4f}, "
+                                f"holdout_f1_reject={record['holdout_f1_reject']:.4f}, "
+                                f"holdout_brier={record['holdout_brier']:.4f}")
+                except Exception as e:
+                    logger.warning(f"    ⚠️ {label} 失敗: {e}")
+        
+        if not tuning_records:
+            logger.warning("所有 tuning 候選皆失敗，保持原 champion")
+            return {}
+        
+        # ── Scoring & Ranking ──
+        tw = tuning_cfg.tuning_weights
+        
+        for rec in tuning_records:
+            # Brier 越低越好 → 取反 (1 - brier) 作為分數
+            score = (
+                tw.get("w_holdout_f1_reject", 0.25) * rec["holdout_f1_reject"] +
+                tw.get("w_monitor_f1_reject", 0.15) * rec["avg_monitor_f1_reject"] +
+                tw.get("w_holdout_brier", 0.15) * (1.0 - rec["holdout_brier"]) +
+                tw.get("w_monitor_brier", 0.10) * (1.0 - rec["avg_monitor_brier"]) +
+                tw.get("w_holdout_auc", 0.10) * rec["holdout_auc"] +
+                tw.get("w_monitor_auc", 0.10) * rec["avg_monitor_auc"] -
+                tw.get("w_stability_penalty", 0.15) * rec["stability_score"]
+            )
+            rec["tuning_score"] = float(score)
+        
+        tuning_records.sort(key=lambda x: x["tuning_score"], reverse=True)
+        
+        # 輸出比較
+        logger.info("\n" + "=" * 60)
+        logger.info("Conservative Tuning 結果排名")
+        logger.info("=" * 60)
+        for i, rec in enumerate(tuning_records):
+            marker = " ← BEST" if i == 0 else ""
+            logger.info(
+                f"  {i+1}. {rec['model_name']}/{rec['config_id']}/"
+                f"{rec['calibration_method']} "
+                f"Score={rec['tuning_score']:.4f} "
+                f"(h_f1r={rec['holdout_f1_reject']:.4f}, "
+                f"h_brier={rec['holdout_brier']:.4f}, "
+                f"h_auc={rec['holdout_auc']:.4f}, "
+                f"m_f1r={rec['avg_monitor_f1_reject']:.4f}, "
+                f"stab={rec['stability_score']:.4f}){marker}"
+            )
+        
+        best = tuning_records[0]
+        
+        logger.info(f"\n✓ Tuning Champion: {best['model_name']} / {best['config_id']} / {best['calibration_method']}")
+        logger.info(f"  Why: tuning_score={best['tuning_score']:.4f}")
+        logger.info(f"    holdout_f1_reject={best['holdout_f1_reject']:.4f}")
+        logger.info(f"    holdout_brier={best['holdout_brier']:.4f}")
+        logger.info(f"    holdout_auc={best['holdout_auc']:.4f}")
+        logger.info(f"    avg_monitor_f1_reject={best['avg_monitor_f1_reject']:.4f}")
+        logger.info(f"    stability_score={best['stability_score']:.4f}")
+        
+        # ★ 更新 champion_strategy 和 tuning state
+        self.champion_strategy = best["model_name"]
+        self.tuning_results = tuning_records
+        self.tuning_best = best
+        
+        return {
+            "best": best,
+            "all_records": tuning_records,
+        }
+    
+    def _evaluate_tuning_candidate(
+        self,
+        model_type: str,
+        config_id: str,
+        params: Dict,
+        calibration_method: str,
+        X_dev: np.ndarray, y_dev: np.ndarray,
+        X_holdout: np.ndarray, y_holdout: np.ndarray,
+        dev_df: pd.DataFrame,
+        scale_pos_weight: float,
+        class_weight: Dict,
+        feature_cols: List[str],
+        use_calibration: bool = True,
+    ) -> Dict:
+        """
+        評估單一 tuning candidate
+        
+        1. 在 rolling windows 上做 quick CV (用 Phase 1 同樣的 windows)
+        2. 在完整 dev 上 retrain + calibrate
+        3. 在 holdout 上評估
+        """
+        # ── 1. 建立模型 ──
+        if model_type == "xgboost":
+            base_model = xgb.XGBClassifier(
+                n_estimators=params.get("n_estimators", 300),
+                max_depth=params.get("max_depth", 3),
+                learning_rate=params.get("learning_rate", 0.03),
+                min_child_weight=params.get("min_child_weight", 20),
+                subsample=params.get("subsample", 0.7),
+                colsample_bytree=params.get("colsample_bytree", 0.7),
+                reg_alpha=params.get("reg_alpha", 1.0),
+                reg_lambda=params.get("reg_lambda", 5.0),
+                gamma=params.get("gamma", 1.0),
+                max_delta_step=params.get("max_delta_step", 1),
+                scale_pos_weight=scale_pos_weight,
+                objective='binary:logistic',
+                eval_metric='auc',
+                random_state=RANDOM_STATE,
+                n_jobs=-1,
+            )
+        elif model_type == "random_forest":
+            base_model = RandomForestClassifier(
+                n_estimators=params.get("n_estimators", 300),
+                max_depth=params.get("max_depth", 6),
+                min_samples_split=params.get("min_samples_split", 50),
+                min_samples_leaf=params.get("min_samples_leaf", 20),
+                max_features=params.get("max_features", "sqrt"),
+                class_weight=class_weight,
+                random_state=RANDOM_STATE,
+                n_jobs=-1,
+            )
+        else:
+            raise ValueError(f"Unknown model_type: {model_type}")
+        
+        # ── 2. Rolling window quick evaluation ──
+        monitor_aucs, monitor_f1_rejects, monitor_ks_list = [], [], []
+        monitor_briers = []
+        
+        for window in self.window_definitions:
+            try:
+                train_df = self.load_development_data(
+                    start_date=window.train_start,
+                    end_date=window.train_end
+                )
+                monitor_df = self.load_development_data(
+                    start_date=window.monitor_start,
+                    end_date=window.monitor_end
+                )
+                
+                if len(train_df) == 0 or len(monitor_df) == 0:
+                    continue
+                
+                X_train, y_train, _ = self._prepare_xy(train_df, feature_cols)
+                X_monitor, y_monitor, _ = self._prepare_xy(monitor_df, feature_cols)
+                
+                model = deepcopy(base_model)
+                
+                if model_type == "xgboost":
+                    model.set_params(early_stopping_rounds=30)
+                    model.fit(
+                        X_train, y_train,
+                        eval_set=[(X_monitor, y_monitor)],
+                        verbose=False
+                    )
+                else:
+                    model.fit(X_train, y_train)
+                
+                y_pred = model.predict_proba(X_monitor)[:, 1]
+                metrics = self.metrics_calc.calculate_all_metrics(y_monitor, y_pred)
+                
+                monitor_aucs.append(metrics['auc'])
+                monitor_f1_rejects.append(metrics['f1_reject'])
+                monitor_ks_list.append(metrics['ks'])
+                monitor_briers.append(metrics['brier_score'])
+            except Exception:
+                continue
+        
+        if not monitor_aucs:
+            raise ValueError(f"No valid rolling windows for {config_id}")
+        
+        stability_score = float((
+            np.std(monitor_aucs) + 
+            np.std(monitor_f1_rejects) + 
+            np.std(monitor_ks_list)
+        ) / 3)
+        
+        # ── 3. Full retrain + calibrate on dev ──
+        full_model = deepcopy(base_model)
+        
+        if use_calibration and calibration_method != "none":
+            cal_model = CalibratedClassifierCV(
+                estimator=full_model,
+                method=calibration_method,
+                cv=5,
+                n_jobs=-1
+            )
+            cal_model.fit(X_dev, y_dev)
+            final_model = cal_model
+        else:
+            if model_type == "xgboost":
+                # Split dev for early stopping
+                from sklearn.model_selection import train_test_split as tts
+                X_tr, X_es, y_tr, y_es = tts(
+                    X_dev, y_dev, test_size=0.15, random_state=RANDOM_STATE, stratify=y_dev
+                )
+                full_model.set_params(early_stopping_rounds=30)
+                full_model.fit(X_tr, y_tr, eval_set=[(X_es, y_es)], verbose=False)
+            else:
+                full_model.fit(X_dev, y_dev)
+            final_model = full_model
+        
+        # ── 4. Holdout evaluation ──
+        y_holdout_pred = final_model.predict_proba(X_holdout)[:, 1]
+        holdout_metrics = self.metrics_calc.calculate_all_metrics(y_holdout, y_holdout_pred)
+        
+        return {
+            "model_name": model_type,
+            "config_id": config_id,
+            "calibration_method": calibration_method,
+            "params": {k: v for k, v in params.items() if k != "config_id"},
+            # Rolling monitor averages
+            "avg_monitor_auc": float(np.mean(monitor_aucs)),
+            "avg_monitor_f1_reject": float(np.mean(monitor_f1_rejects)),
+            "avg_monitor_ks": float(np.mean(monitor_ks_list)),
+            "avg_monitor_brier": float(np.mean(monitor_briers)),
+            "std_monitor_auc": float(np.std(monitor_aucs)),
+            "std_monitor_f1_reject": float(np.std(monitor_f1_rejects)),
+            # Holdout
+            "holdout_auc": holdout_metrics['auc'],
+            "holdout_f1_reject": holdout_metrics['f1_reject'],
+            "holdout_ks": holdout_metrics['ks'],
+            "holdout_brier": holdout_metrics['brier_score'],
+            # Stability
+            "stability_score": stability_score,
+            # Meta
+            "selected_as_champion": False,  # 後續更新
+        }
+
     # ============================================
     # Phase 2: Champion Retraining
     # ============================================
@@ -1512,16 +2023,59 @@ class FourPhaseTrainer:
         logger.info(f"正樣本比例: {positive_ratio:.2%}")
         logger.info(f"Imbalance Strategy: {self.imbalance_handler.strategy}")
         
-        # 取得模型
+        # 取得模型 — 若有 tuning 結果，使用 tuning best 的 params
         scale_pos_weight = self.imbalance_handler.calculate_scale_pos_weight(y)
         class_weight = self.imbalance_handler.calculate_class_weight(y)
         
-        if self.champion_strategy == "xgboost":
-            base_model = CandidateModels.get_xgboost(scale_pos_weight)
-        elif self.champion_strategy == "random_forest":
-            base_model = CandidateModels.get_random_forest(class_weight)
+        tuning_best = getattr(self, 'tuning_best', None)
+        
+        if tuning_best is not None:
+            # ★ 使用 tuning 選出的最佳參數
+            logger.info(f"  使用 Tuning Best Config: {tuning_best['config_id']}")
+            best_params = tuning_best.get("params", {})
+            calibration_method = tuning_best.get("calibration_method", calibration_method)
+            use_calibration = (calibration_method != "none")
+            
+            if self.champion_strategy == "xgboost":
+                base_model = xgb.XGBClassifier(
+                    n_estimators=best_params.get("n_estimators", 300),
+                    max_depth=best_params.get("max_depth", 3),
+                    learning_rate=best_params.get("learning_rate", 0.03),
+                    min_child_weight=best_params.get("min_child_weight", 20),
+                    subsample=best_params.get("subsample", 0.7),
+                    colsample_bytree=best_params.get("colsample_bytree", 0.7),
+                    reg_alpha=best_params.get("reg_alpha", 1.0),
+                    reg_lambda=best_params.get("reg_lambda", 5.0),
+                    gamma=best_params.get("gamma", 1.0),
+                    max_delta_step=best_params.get("max_delta_step", 1),
+                    scale_pos_weight=scale_pos_weight,
+                    objective='binary:logistic',
+                    eval_metric='auc',
+                    random_state=RANDOM_STATE,
+                    n_jobs=-1,
+                )
+            elif self.champion_strategy == "random_forest":
+                base_model = RandomForestClassifier(
+                    n_estimators=best_params.get("n_estimators", 300),
+                    max_depth=best_params.get("max_depth", 6),
+                    min_samples_split=best_params.get("min_samples_split", 50),
+                    min_samples_leaf=best_params.get("min_samples_leaf", 20),
+                    max_features=best_params.get("max_features", "sqrt"),
+                    class_weight=class_weight,
+                    random_state=RANDOM_STATE,
+                    n_jobs=-1,
+                )
+            else:
+                base_model = CandidateModels.get_logistic_regression(class_weight)
+            
+            logger.info(f"  Calibration Method: {calibration_method}")
         else:
-            base_model = CandidateModels.get_logistic_regression(class_weight)
+            if self.champion_strategy == "xgboost":
+                base_model = CandidateModels.get_xgboost(scale_pos_weight)
+            elif self.champion_strategy == "random_forest":
+                base_model = CandidateModels.get_random_forest(class_weight)
+            else:
+                base_model = CandidateModels.get_logistic_regression(class_weight)
         
         # 訓練
         if use_calibration:
@@ -1559,8 +2113,14 @@ class FourPhaseTrainer:
         self.diagnostics.train_ks = in_sample_metrics['ks']
         self.diagnostics.train_brier = in_sample_metrics['brier_score']
         
-        # 從 rolling 取得 monitor 平均
-        if self.champion_strategy in self.strategy_results:
+        # 從 rolling / tuning 取得 monitor 平均
+        if tuning_best is not None:
+            self.diagnostics.avg_monitor_auc = tuning_best.get("avg_monitor_auc", 0.0)
+            self.diagnostics.avg_monitor_f1_reject = tuning_best.get("avg_monitor_f1_reject", 0.0)
+            self.diagnostics.avg_monitor_ks = tuning_best.get("avg_monitor_ks", 0.0)
+            self.diagnostics.avg_monitor_brier = tuning_best.get("avg_monitor_brier", 0.0)
+            self.diagnostics.std_monitor_auc = tuning_best.get("std_monitor_auc", 0.0)
+        elif self.champion_strategy in self.strategy_results:
             strat = self.strategy_results[self.champion_strategy]
             self.diagnostics.avg_monitor_auc = strat.avg_monitor_auc
             self.diagnostics.avg_monitor_f1_reject = strat.avg_monitor_f1_reject
@@ -1648,11 +2208,27 @@ class FourPhaseTrainer:
         
         logger.info(f"評估了 {len(threshold_results)} 組 threshold 組合")
         
-        # 找出推薦的 threshold
-        # 標準：auto_decision_rate >= 0.5 且 precision 最高
-        valid_results = [r for r in threshold_results if r.auto_decision_rate >= 0.5]
-        if valid_results:
-            best = max(valid_results, key=lambda x: (x.expected_precision_high + x.expected_precision_low) / 2)
+        # ── Business Constraint Filtering + Composite Scoring (V2) ──
+        bc_cfg = self.config.business_constraints if hasattr(self.config, 'business_constraints') else BusinessConstraintConfig()
+        
+        logger.info(f"\nBusiness Constraints:")
+        logger.info(f"  max_manual_review_ratio: {bc_cfg.max_manual_review_ratio:.2%}")
+        logger.info(f"  min_auto_decision_rate: {bc_cfg.min_auto_decision_rate:.2%}")
+        logger.info(f"  min_low_zone_ratio: {bc_cfg.min_low_zone_ratio:.2%}")
+        logger.info(f"  target_auto_decision_rate: {bc_cfg.target_auto_decision_rate:.2%}")
+        
+        scored_results = score_threshold_policy(threshold_results, bc_cfg)
+        
+        # 統計約束過濾結果
+        n_pass = sum(1 for r in scored_results if r.passes_hard_constraints)
+        n_fail = sum(1 for r in scored_results if not r.passes_hard_constraints)
+        logger.info(f"\n約束過濾結果: {n_pass} 組通過 / {n_fail} 組不通過")
+        
+        # 選出最佳 threshold
+        passing_results = [r for r in scored_results if r.passes_hard_constraints]
+        
+        if passing_results:
+            best = passing_results[0]  # score_threshold_policy 已排序
             
             # ★ 保存推薦 threshold 到 class attribute，供 Phase 4 / Monitoring 使用
             self.selected_lower_threshold = best.lower_threshold
@@ -1661,16 +2237,49 @@ class FourPhaseTrainer:
             logger.info(f"\n✓ Phase 3 推薦 Threshold（已保存至 trainer state）:")
             logger.info(f"  Lower: {self.selected_lower_threshold}")
             logger.info(f"  Upper: {self.selected_upper_threshold}")
+            logger.info(f"  Threshold Score: {best.threshold_score:.4f}")
             logger.info(f"  Auto Decision Rate: {best.auto_decision_rate:.2%}")
+            logger.info(f"  Manual Review Load: {best.manual_review_load:.2%}")
             logger.info(f"  High Zone Precision: {best.expected_precision_high:.2%}")
             logger.info(f"  Low Zone Precision: {best.expected_precision_low:.2%}")
+            logger.info(f"  High Zone Ratio: {best.high_zone_ratio:.2%}")
+            logger.info(f"  Low Zone Ratio: {best.low_zone_ratio:.2%}")
+            
+            # 顯示 Top-3 候選
+            logger.info(f"\n  Top-3 候選:")
+            for i, r in enumerate(passing_results[:3]):
+                logger.info(f"    {i+1}. lower={r.lower_threshold}, upper={r.upper_threshold} "
+                            f"→ score={r.threshold_score:.4f}, "
+                            f"auto={r.auto_decision_rate:.2%}, "
+                            f"manual={r.manual_review_load:.2%}, "
+                            f"high_prec={r.expected_precision_high:.2%}")
         else:
-            logger.warning("⚠️ Phase 3 無法找到滿足條件的 threshold 組合，將使用預設值")
+            # Fallback: 放寬約束，從所有結果中選 score 最高的
+            logger.warning("⚠️ 無組合通過 hard constraints，放寬至所有結果中選最佳")
+            if scored_results:
+                best = scored_results[0]
+                self.selected_lower_threshold = best.lower_threshold
+                self.selected_upper_threshold = best.upper_threshold
+                logger.warning(f"  Fallback 選擇: lower={best.lower_threshold}, upper={best.upper_threshold}")
+                logger.warning(f"  Violations: {best.constraint_violations}")
+            else:
+                logger.warning("⚠️ Phase 3 無法找到任何 threshold 組合，將使用預設值")
         
         # 建立 predictions DataFrame
         predictions_df = policy_val_df[['案件編號', '進件日', '授信結果_二元']].copy()
         predictions_df['pred_prob'] = y_pred_proba
         predictions_df['actual_label'] = y
+        
+        # ★ Phase 3 也輸出 zone assignment（使用推薦 threshold 或 fallback）
+        pv_lower = self.selected_lower_threshold if self.selected_lower_threshold is not None else 0.5
+        pv_upper = self.selected_upper_threshold if self.selected_upper_threshold is not None else 0.85
+        predictions_df['pred_zone'] = assign_score_zone(y_pred_proba, pv_lower, pv_upper)
+        predictions_df['zone_name'] = predictions_df['pred_zone'].map({
+            2: '高通過機率區', 1: '人工審核區', 0: '低通過機率區'
+        })
+        predictions_df['lower_threshold_used'] = pv_lower
+        predictions_df['upper_threshold_used'] = pv_upper
+        predictions_df['threshold_source'] = 'phase3_recommended' if self.selected_lower_threshold is not None else 'default'
         
         return predictions_df, threshold_results, pv_metrics
     
@@ -1787,6 +2396,9 @@ class FourPhaseTrainer:
             2: '高通過機率區', 1: '人工審核區', 0: '低通過機率區'
         })
         predictions_df['actual_label'] = y
+        predictions_df['lower_threshold_used'] = lower_threshold
+        predictions_df['upper_threshold_used'] = upper_threshold
+        predictions_df['threshold_source'] = 'phase3_recommended' if self.selected_lower_threshold is not None else 'fallback_default'
         
         return predictions_df, holdout_metrics, zone_summaries
     
@@ -1867,6 +2479,9 @@ class FourPhaseTrainer:
             logger.info("  ✓ rolling_results.csv")
         
         # 2. champion_summary.json
+        cs_cfg = self.config.champion_selection if hasattr(self.config, 'champion_selection') else ChampionSelectionConfig()
+        bc_cfg = self.config.business_constraints if hasattr(self.config, 'business_constraints') else BusinessConstraintConfig()
+        
         champion_data = {
             "run_id": run_id,
             "created_at": datetime.now().isoformat(),
@@ -1886,15 +2501,68 @@ class FourPhaseTrainer:
                 "upper_threshold": upper_threshold,
                 "source": "phase3_recommended" if self.selected_lower_threshold is not None else "default",
             },
+            "champion_selection_config": cs_cfg.to_dict(),
+            "business_constraints_config": bc_cfg.to_dict(),
             "strategy_results": {
                 name: {k: v for k, v in strategy.to_dict().items() if k != 'cycle_results'}
                 for name, strategy in self.strategy_results.items()
             }
         }
         
+        # ★ 如果有 tuning 結果，加入 tuning metadata
+        tuning_best = getattr(self, 'tuning_best', None)
+        if tuning_best is not None:
+            champion_data["tuning_config"] = {
+                "config_id": tuning_best.get("config_id", ""),
+                "calibration_method": tuning_best.get("calibration_method", ""),
+                "params": tuning_best.get("params", {}),
+                "tuning_score": tuning_best.get("tuning_score", 0.0),
+                "why_selected": (
+                    f"Tuning score={tuning_best.get('tuning_score', 0):.4f}: "
+                    f"holdout_f1_reject={tuning_best.get('holdout_f1_reject', 0):.4f}, "
+                    f"holdout_brier={tuning_best.get('holdout_brier', 0):.4f}, "
+                    f"holdout_auc={tuning_best.get('holdout_auc', 0):.4f}, "
+                    f"stability={tuning_best.get('stability_score', 0):.4f}"
+                ),
+            }
+            champion_data["rejection_detection_score"] = tuning_best.get("holdout_f1_reject", 0.0)
+            champion_data["calibration_score"] = 1.0 - tuning_best.get("holdout_brier", 0.0)
+        
         with open(output_dir / "champion_summary.json", 'w', encoding='utf-8') as f:
             json.dump(champion_data, f, ensure_ascii=False, indent=2)
         logger.info("  ✓ champion_summary.json")
+        
+        # 2b. tuning_comparison.csv
+        tuning_results = getattr(self, 'tuning_results', None)
+        if tuning_results:
+            # Mark the best as selected
+            if tuning_best:
+                for rec in tuning_results:
+                    rec["selected_as_champion"] = (
+                        rec.get("config_id") == tuning_best.get("config_id") and
+                        rec.get("calibration_method") == tuning_best.get("calibration_method") and
+                        rec.get("model_name") == tuning_best.get("model_name")
+                    )
+            
+            tuning_df = pd.DataFrame(tuning_results)
+            # Reorder columns for readability
+            priority_cols = [
+                "model_name", "config_id", "calibration_method",
+                "tuning_score",
+                "avg_monitor_auc", "avg_monitor_f1_reject",
+                "avg_monitor_ks", "avg_monitor_brier",
+                "holdout_auc", "holdout_f1_reject",
+                "holdout_ks", "holdout_brier",
+                "stability_score", "selected_as_champion",
+            ]
+            existing_priority = [c for c in priority_cols if c in tuning_df.columns]
+            other_cols = [c for c in tuning_df.columns if c not in existing_priority]
+            tuning_df = tuning_df[existing_priority + other_cols]
+            tuning_df.to_csv(
+                output_dir / "tuning_comparison.csv",
+                index=False, encoding='utf-8-sig'
+            )
+            logger.info("  ✓ tuning_comparison.csv")
         
         # 3. policy_validation_predictions.csv
         if policy_predictions_df is not None:
@@ -1923,8 +2591,16 @@ class FourPhaseTrainer:
         
         # 6. final_holdout_metrics.json
         if holdout_metrics is not None:
+            holdout_metrics_with_meta = {
+                **holdout_metrics,
+                "threshold_config": {
+                    "lower_threshold": lower_threshold,
+                    "upper_threshold": upper_threshold,
+                    "source": "phase3_recommended" if self.selected_lower_threshold is not None else "default",
+                },
+            }
             with open(output_dir / "final_holdout_metrics.json", 'w', encoding='utf-8') as f:
-                json.dump(holdout_metrics, f, ensure_ascii=False, indent=2)
+                json.dump(holdout_metrics_with_meta, f, ensure_ascii=False, indent=2)
             logger.info("  ✓ final_holdout_metrics.json")
         
         # 7. zone_summary.csv
@@ -1953,22 +2629,35 @@ class FourPhaseTrainer:
         
         # 11. zone_policy_summary.json
         if threshold_results is not None:
-            # 取最佳 threshold 組合
-            valid_results = [r for r in threshold_results if r.auto_decision_rate >= 0.5]
-            if valid_results:
-                best = max(valid_results, key=lambda x: (x.expected_precision_high + x.expected_precision_low) / 2)
+            # 使用 score_threshold_policy 排序後的結果
+            bc_cfg_save = self.config.business_constraints if hasattr(self.config, 'business_constraints') else BusinessConstraintConfig()
+            scored_for_save = score_threshold_policy(threshold_results, bc_cfg_save)
+            passing_for_save = [r for r in scored_for_save if r.passes_hard_constraints]
+            
+            if passing_for_save:
+                best = passing_for_save[0]
+            elif scored_for_save:
+                best = scored_for_save[0]
+            else:
+                best = None
+            
+            if best is not None:
                 zone_policy = {
                     "selected_lower_threshold": lower_threshold,
                     "selected_upper_threshold": upper_threshold,
                     "threshold_source": "phase3_recommended" if self.selected_lower_threshold is not None else "default",
                     "recommended_lower_threshold": best.lower_threshold,
                     "recommended_upper_threshold": best.upper_threshold,
+                    "threshold_score": best.threshold_score,
+                    "passes_hard_constraints": best.passes_hard_constraints,
                     "auto_decision_rate": best.auto_decision_rate,
+                    "manual_review_load": best.manual_review_load,
                     "high_zone_ratio": best.high_zone_ratio,
                     "review_zone_ratio": best.review_zone_ratio,
                     "low_zone_ratio": best.low_zone_ratio,
                     "high_zone_precision": best.expected_precision_high,
                     "low_zone_precision": best.expected_precision_low,
+                    "business_constraints": bc_cfg_save.to_dict(),
                 }
                 
                 with open(output_dir / "zone_policy_summary.json", 'w', encoding='utf-8') as f:
@@ -2001,10 +2690,17 @@ class FourPhaseTrainer:
             # Phase 1: Rolling Training
             self.run_phase1_rolling_training(model_names)
             
-            # Select Champion
+            # Select Champion (Phase 1 結果)
             self.select_champion_strategy()
             
-            # Phase 2: Champion Retraining
+            # ★ Conservative Fine-Tuning (Phase 1 → Phase 2 之間)
+            tuning_cfg = self.config.tuning if hasattr(self.config, 'tuning') else TuningConfig()
+            if tuning_cfg.enable_tuning:
+                tuning_result = self.run_conservative_tuning(use_calibration=use_calibration)
+            else:
+                tuning_result = {}
+            
+            # Phase 2: Champion Retraining (使用 tuning best config)
             self.run_phase2_champion_retraining(use_calibration=use_calibration)
             
             # Phase 3: Policy Validation
@@ -2091,9 +2787,19 @@ def run_four_phase_pipeline(
     if project_root is None:
         project_root = Path(__file__).parent.parent
     
+    # 嘗試載入 pipeline_config.yaml
+    config_path = Path(project_root) / "config" / "pipeline_config.yaml"
+    if config_path.exists():
+        config = ConfigManager(config_path)
+        logger.info(f"載入設定檔: {config_path}")
+    else:
+        config = default_config
+        logger.info("使用預設設定 (default_config)")
+    
     trainer = FourPhaseTrainer(
         project_root=project_root,
-        imbalance_strategy=imbalance_strategy
+        imbalance_strategy=imbalance_strategy,
+        config=config
     )
     
     return trainer.run_full_pipeline(

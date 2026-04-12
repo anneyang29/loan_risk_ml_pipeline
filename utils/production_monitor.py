@@ -469,6 +469,15 @@ class ProductionMonitor:
         lower = lower_threshold or self.config.default_lower_threshold
         upper = upper_threshold or self.config.default_upper_threshold
         
+        # ★ 明確 log monitoring 使用的 threshold
+        logger.info(f"\n★ Production Monitoring Threshold:")
+        logger.info(f"  Lower: {lower}")
+        logger.info(f"  Upper: {upper}")
+        if lower_threshold is not None:
+            logger.info(f"  來源: 呼叫端傳入 (Phase 3 推薦 / CLI)")
+        else:
+            logger.info(f"  來源: ProductionMonitoringConfig 預設值")
+        
         result = ProductionMonitoringResult(
             model_version=model_version,
             monitoring_period_start=period_start,
@@ -647,6 +656,12 @@ class ProductionMonitor:
         logger.info(f"  High: {result.zone_high_count} ({result.zone_high_ratio:.1%})")
         logger.info(f"  Manual: {result.zone_manual_count} ({result.zone_manual_ratio:.1%})")
         logger.info(f"  Low: {result.zone_low_count} ({result.zone_low_ratio:.1%})")
+        
+        if self.baseline_zone_distribution:
+            logger.info(f"\nZone Shift (vs Baseline):")
+            logger.info(f"  High shift: {result.zone_high_shift:+.2%} (baseline={result.baseline_zone_high_ratio:.1%})")
+            logger.info(f"  Manual shift: {result.zone_manual_shift:+.2%} (baseline={result.baseline_zone_manual_ratio:.1%})")
+            logger.info(f"  Low shift: {result.zone_low_shift:+.2%} (baseline={result.baseline_zone_low_ratio:.1%})")
         
         if result.score_psi is not None:
             logger.info(f"\nScore PSI: {result.score_psi:.4f}")

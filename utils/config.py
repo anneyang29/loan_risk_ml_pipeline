@@ -491,6 +491,109 @@ class ThresholdGridConfig:
 
 
 # ============================================
+# Business Constraint Config (Phase 3 Threshold Policy)
+# ============================================
+@dataclass
+class BusinessConstraintConfig:
+    """
+    業務約束條件 — 用於 Phase 3 Threshold Policy Selection
+    
+    控制自動選出的 threshold 組合必須滿足的業務規則，
+    避免選出 manual review 過大或 low zone 過小的極端組合。
+    
+    Hard Constraints（不滿足直接排除）:
+    - max_manual_review_ratio: 人工審核比例上限
+    - min_auto_decision_rate: 自動決策率下限
+    - min_low_zone_ratio: 低通過區最小佔比（確保模型有篩選能力）
+    
+    Soft Targets（納入 scoring，但不硬性排除）:
+    - min_high_zone_precision: 高區域核准精確度目標
+    - min_low_zone_reject_precision: 低區域婉拒精確度目標
+    - target_auto_decision_rate: 自動決策率理想值（用於 scoring 加分）
+    
+    Scoring Weights（threshold 組合評分權重）:
+    - w_precision: 精確度權重
+    - w_auto_rate: 自動決策率權重
+    - w_zone_balance: 區間平衡性權重
+    """
+    version: str = "1.0.0"
+    
+    # ── Hard Constraints ──
+    max_manual_review_ratio: float = 0.15    # 人工審核不得超過 15%
+    min_auto_decision_rate: float = 0.85     # 自動決策率至少 85%
+    min_low_zone_ratio: float = 0.02         # low zone 至少 2%（確保有篩選力）
+    
+    # ── Soft Targets ──
+    min_high_zone_precision: float = 0.95    # 高區核准精確度目標
+    min_low_zone_reject_precision: float = 0.70  # 低區婉拒精確度目標
+    target_auto_decision_rate: float = 0.90  # 理想自動決策率
+    
+    # ── Scoring Weights ──
+    w_precision: float = 0.40               # 精確度在 threshold score 中的權重
+    w_auto_rate: float = 0.35               # 自動決策率在 threshold score 中的權重
+    w_zone_balance: float = 0.25            # 區間平衡性在 threshold score 中的權重
+    
+    def to_dict(self) -> Dict:
+        return {
+            "version": self.version,
+            "hard_constraints": {
+                "max_manual_review_ratio": self.max_manual_review_ratio,
+                "min_auto_decision_rate": self.min_auto_decision_rate,
+                "min_low_zone_ratio": self.min_low_zone_ratio,
+            },
+            "soft_targets": {
+                "min_high_zone_precision": self.min_high_zone_precision,
+                "min_low_zone_reject_precision": self.min_low_zone_reject_precision,
+                "target_auto_decision_rate": self.target_auto_decision_rate,
+            },
+            "scoring_weights": {
+                "w_precision": self.w_precision,
+                "w_auto_rate": self.w_auto_rate,
+                "w_zone_balance": self.w_zone_balance,
+            },
+        }
+
+
+# ============================================
+# Champion Selection Config
+# ============================================
+@dataclass
+class ChampionSelectionConfig:
+    """
+    Champion Strategy 選擇權重設定
+    
+    用於 Phase 1 的 select_champion_strategy()
+    控制各指標在 overall_score 中的權重
+    
+    設計理念：
+    - 信用風險模型重視「拒絕壞客戶」的能力 → f1_reject 最重要
+    - 跨 cycle 穩定性是生產可靠性的基礎 → stability 懲罰加重
+    - KS 反映區分好壞客戶的能力 → 比純 AUC 更有業務意義
+    - CV AUC 作為基礎校驗，不應主導排名
+    """
+    version: str = "1.0.0"
+    
+    # ── 指標權重 ──
+    w_cv_auc: float = 0.10              # CV AUC（基礎校驗，降低權重）
+    w_monitor_auc: float = 0.20         # Monitor AUC（OOT 表現）
+    w_monitor_f1_reject: float = 0.35   # Monitor F1_reject（核心指標，最高權重）
+    w_monitor_ks: float = 0.15          # Monitor KS（區分力）
+    w_stability_penalty: float = 0.20   # 穩定性懲罰（加重）
+    
+    def to_dict(self) -> Dict:
+        return {
+            "version": self.version,
+            "weights": {
+                "w_cv_auc": self.w_cv_auc,
+                "w_monitor_auc": self.w_monitor_auc,
+                "w_monitor_f1_reject": self.w_monitor_f1_reject,
+                "w_monitor_ks": self.w_monitor_ks,
+                "w_stability_penalty": self.w_stability_penalty,
+            },
+        }
+
+
+# ============================================
 # Monitoring Config
 # ============================================
 @dataclass
@@ -586,6 +689,106 @@ class DiagnosticsConfig:
             "calibration": {
                 "max_calibration_error": self.max_calibration_error,
             },
+        }
+
+
+# ============================================
+# Conservative Tuning Config
+# ============================================
+@dataclass
+class TuningConfig:
+    """
+    保守型 Fine-Tuning 設定
+    
+    不做大範圍 grid search，只在已知 champion 的基礎上
+    做小範圍候選組合搜尋，重點是：
+    - 提升 F1_reject
+    - 改善 calibration (Brier score)
+    - 降低 overfitting / 提升 robustness
+    
+    同時保留 challenger (random_forest) 做比較
+    """
+    version: str = "1.0.0"
+    
+    # 是否啟用 tuning
+    enable_tuning: bool = True
+    
+    # XGBoost 候選參數（保守方向：降 depth, 增 regularization）
+    xgb_candidates: List[Dict[str, Any]] = field(default_factory=lambda: [
+        {
+            "config_id": "xgb_baseline",
+            "max_depth": 3, "min_child_weight": 20,
+            "subsample": 0.7, "colsample_bytree": 0.7,
+            "reg_alpha": 1.0, "reg_lambda": 5.0,
+            "learning_rate": 0.03, "n_estimators": 300,
+            "gamma": 1.0, "max_delta_step": 1,
+        },
+        {
+            "config_id": "xgb_conservative",
+            "max_depth": 3, "min_child_weight": 30,
+            "subsample": 0.7, "colsample_bytree": 0.6,
+            "reg_alpha": 2.0, "reg_lambda": 8.0,
+            "learning_rate": 0.02, "n_estimators": 400,
+            "gamma": 1.5, "max_delta_step": 2,
+        },
+        {
+            "config_id": "xgb_depth4",
+            "max_depth": 4, "min_child_weight": 15,
+            "subsample": 0.8, "colsample_bytree": 0.7,
+            "reg_alpha": 1.0, "reg_lambda": 5.0,
+            "learning_rate": 0.03, "n_estimators": 300,
+            "gamma": 0.5, "max_delta_step": 1,
+        },
+        {
+            "config_id": "xgb_shallow_strong_reg",
+            "max_depth": 2, "min_child_weight": 25,
+            "subsample": 0.7, "colsample_bytree": 0.6,
+            "reg_alpha": 3.0, "reg_lambda": 10.0,
+            "learning_rate": 0.03, "n_estimators": 500,
+            "gamma": 2.0, "max_delta_step": 2,
+        },
+    ])
+    
+    # Random Forest 候選參數（challenger）
+    rf_candidates: List[Dict[str, Any]] = field(default_factory=lambda: [
+        {
+            "config_id": "rf_baseline",
+            "n_estimators": 300, "max_depth": 6,
+            "min_samples_split": 50, "min_samples_leaf": 20,
+            "max_features": "sqrt",
+        },
+        {
+            "config_id": "rf_conservative",
+            "n_estimators": 500, "max_depth": 5,
+            "min_samples_split": 80, "min_samples_leaf": 30,
+            "max_features": "sqrt",
+        },
+    ])
+    
+    # Calibration 候選方法
+    calibration_methods: List[str] = field(default_factory=lambda: [
+        "isotonic", "sigmoid", "none"
+    ])
+    
+    # Tuning 選模權重（重視 reject detection + calibration + stability）
+    tuning_weights: Dict[str, float] = field(default_factory=lambda: {
+        "w_holdout_f1_reject": 0.25,
+        "w_monitor_f1_reject": 0.15,
+        "w_holdout_brier": 0.15,        # 越低越好（取反）
+        "w_monitor_brier": 0.10,        # 越低越好（取反）
+        "w_holdout_auc": 0.10,
+        "w_monitor_auc": 0.10,
+        "w_stability_penalty": 0.15,
+    })
+    
+    def to_dict(self) -> Dict:
+        return {
+            "version": self.version,
+            "enable_tuning": self.enable_tuning,
+            "xgb_candidates": self.xgb_candidates,
+            "rf_candidates": self.rf_candidates,
+            "calibration_methods": self.calibration_methods,
+            "tuning_weights": self.tuning_weights,
         }
 
 
@@ -798,6 +1001,9 @@ class ConfigManager:
         # ACTIVE — 四階段訓練主設定
         self.phase_config = PhaseConfigV2()
         self.threshold_grid = ThresholdGridConfig()
+        self.business_constraints = BusinessConstraintConfig()
+        self.champion_selection = ChampionSelectionConfig()
+        self.tuning = TuningConfig()
         self.monitoring = MonitoringConfigV2()
         self.diagnostics = DiagnosticsConfig()
         self.model_training = ModelTrainingConfig()
@@ -844,6 +1050,44 @@ class ConfigManager:
                 min_threshold_gap=tg.get('min_threshold_gap', 0.15),
             )
         
+        if 'business_constraints' in config:
+            bc = config['business_constraints']
+            hard = bc.get('hard_constraints', {})
+            soft = bc.get('soft_targets', {})
+            sw = bc.get('scoring_weights', {})
+            self.business_constraints = BusinessConstraintConfig(
+                max_manual_review_ratio=hard.get('max_manual_review_ratio', 0.15),
+                min_auto_decision_rate=hard.get('min_auto_decision_rate', 0.85),
+                min_low_zone_ratio=hard.get('min_low_zone_ratio', 0.02),
+                min_high_zone_precision=soft.get('min_high_zone_precision', 0.95),
+                min_low_zone_reject_precision=soft.get('min_low_zone_reject_precision', 0.70),
+                target_auto_decision_rate=soft.get('target_auto_decision_rate', 0.90),
+                w_precision=sw.get('w_precision', 0.40),
+                w_auto_rate=sw.get('w_auto_rate', 0.35),
+                w_zone_balance=sw.get('w_zone_balance', 0.25),
+            )
+        
+        if 'champion_selection' in config:
+            cs = config['champion_selection']
+            weights = cs.get('weights', {})
+            self.champion_selection = ChampionSelectionConfig(
+                w_cv_auc=weights.get('w_cv_auc', 0.10),
+                w_monitor_auc=weights.get('w_monitor_auc', 0.20),
+                w_monitor_f1_reject=weights.get('w_monitor_f1_reject', 0.35),
+                w_monitor_ks=weights.get('w_monitor_ks', 0.15),
+                w_stability_penalty=weights.get('w_stability_penalty', 0.20),
+            )
+        
+        if 'tuning' in config:
+            tc = config['tuning']
+            self.tuning = TuningConfig(
+                enable_tuning=tc.get('enable_tuning', True),
+                xgb_candidates=tc.get('xgb_candidates', TuningConfig().xgb_candidates),
+                rf_candidates=tc.get('rf_candidates', TuningConfig().rf_candidates),
+                calibration_methods=tc.get('calibration_methods', ["isotonic", "sigmoid", "none"]),
+                tuning_weights=tc.get('tuning_weights', TuningConfig().tuning_weights),
+            )
+        
         if 'monitoring' in config:
             mc = config['monitoring']
             self.monitoring = MonitoringConfigV2(
@@ -880,6 +1124,9 @@ class ConfigManager:
             # V2 Config
             "phase_config": self.phase_config.to_dict(),
             "threshold_grid": self.threshold_grid.to_dict(),
+            "business_constraints": self.business_constraints.to_dict(),
+            "champion_selection": self.champion_selection.to_dict(),
+            "tuning": self.tuning.to_dict(),
             "monitoring": self.monitoring.to_dict(),
             "diagnostics": self.diagnostics.to_dict(),
             "model_training": self.model_training.to_dict(),
@@ -910,6 +1157,9 @@ class ConfigManager:
         return {
             "phase_config": self.phase_config.to_dict(),
             "threshold_grid": self.threshold_grid.to_dict(),
+            "business_constraints": self.business_constraints.to_dict(),
+            "champion_selection": self.champion_selection.to_dict(),
+            "tuning": self.tuning.to_dict(),
             "monitoring": self.monitoring.to_dict(),
             "diagnostics": self.diagnostics.to_dict(),
             "model_training": self.model_training.to_dict(),

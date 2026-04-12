@@ -135,6 +135,14 @@ from .model_registry import (
 )
 
 # ──────────────────────────────────────────
+# Supporting: Baseline Manager
+# ──────────────────────────────────────────
+from .baseline_manager import (
+    BaselineManager,
+    BaselineRecord,
+)
+
+# ──────────────────────────────────────────
 # Legacy: Rolling Trainer（已由 FourPhaseTrainer 取代）
 # ⚠️ 不建議新開發直接 import 這些模組
 # ⚠️ 僅保留供 notebook / 分析腳本 / CI 向後相容
@@ -208,6 +216,9 @@ __all__ = [
     # ── Supporting: Model Registry ──
     "ModelRecord",
     "ModelRegistry",
+    # ── Supporting: Baseline Manager ──
+    "BaselineManager",
+    "BaselineRecord",
     # ── Legacy (向後相容，不建議新開發使用) ──
     # 僅暴露最小 API 供舊 notebook / CI 腳本使用
     # 新功能請使用 FourPhaseTrainer / AdvancedProductionMonitor
