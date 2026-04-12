@@ -345,11 +345,17 @@ class FeatureDefinitionConfig:
 
 
 # ============================================
-# Time Period Config
+# Time Period Config — LEGACY（僅供 Gold Layer 向後相容）
 # ============================================
 @dataclass
 class TimePeriodConfig:
-    """時間區間設定"""
+    """
+    時間區間設定 — LEGACY
+    
+    ⚠️ 此 Config 僅供 Gold Layer (data_processing_gold_table) 使用，
+       用來定義 development / oot 的原始切分點與 Rolling Window 參數。
+    ⚠️ 四階段訓練架構的主設定請使用 PhaseConfigV2。
+    """
     version: str = "1.0.0"
     
     # 資料區間
@@ -372,6 +378,268 @@ class TimePeriodConfig:
             "train_months": self.train_months,
             "monitor_months": self.monitor_months,
             "step_months": self.step_months,
+        }
+
+
+# ============================================
+# Phase Config — ACTIVE（四階段主訓練設定）
+# ============================================
+@dataclass
+class PhaseConfigV2:
+    """
+    四階段架構的時間設定 — ACTIVE（Source of Truth）
+    
+    ✅ 這是四階段訓練流程的主設定，由 FourPhaseTrainer 與 main.py 使用。
+    
+    Phase 1: Development (Rolling Training) - 18個月
+    Phase 2: Champion Retraining (用全部 development 重訓)
+    Phase 3: Policy Validation (Threshold Tuning) - 4個月
+    Phase 4: Final Blind Holdout - 2個月
+    """
+    version: str = "2.0.0"
+    
+    # 總資料區間
+    data_start: date = date(2024, 4, 1)
+    data_end: date = date(2026, 3, 31)
+    
+    # 各階段長度（月）
+    development_months: int = 18      # Phase 1: Rolling Training
+    policy_months: int = 4            # Phase 3: Policy Validation
+    holdout_months: int = 2           # Phase 4: Final Blind Holdout
+    
+    # Rolling Training 設定
+    rolling_train_months: int = 4     # 每個 cycle 訓練長度
+    rolling_monitor_months: int = 2   # 每個 cycle 監控長度
+    rolling_step_months: int = 2      # 滑動步長
+    
+    # Imbalance 策略
+    imbalance_strategies: List[str] = field(default_factory=lambda: [
+        "scale_weight",                # Scale pos weight
+        "class_weight",                # Class weight balanced
+        "smote",                       # SMOTE oversampling
+        "undersample",                 # Random undersampling
+        "none",                        # 不處理
+    ])
+    
+    def to_dict(self) -> Dict:
+        return {
+            "version": self.version,
+            "data_start": str(self.data_start),
+            "data_end": str(self.data_end),
+            "development_months": self.development_months,
+            "policy_months": self.policy_months,
+            "holdout_months": self.holdout_months,
+            "rolling": {
+                "train_months": self.rolling_train_months,
+                "monitor_months": self.rolling_monitor_months,
+                "step_months": self.rolling_step_months,
+            },
+            "imbalance_strategies": self.imbalance_strategies,
+        }
+
+
+# ============================================
+# Threshold Grid Config
+# ============================================
+@dataclass
+class ThresholdGridConfig:
+    """
+    Threshold Grid 設定
+    
+    用於 Phase 3: Policy Validation
+    搜尋最佳 lower/upper threshold 組合
+    """
+    version: str = "1.0.0"
+    
+    # 預設 grid（針對高 imbalance 場景，分數集中在高位）
+    lower_thresholds: List[float] = field(default_factory=lambda: [
+        0.30, 0.40, 0.50, 0.60, 0.70, 0.80
+    ])
+    
+    upper_thresholds: List[float] = field(default_factory=lambda: [
+        0.70, 0.80, 0.85, 0.90, 0.95
+    ])
+    
+    # 約束條件
+    min_threshold_gap: float = 0.15   # lower 與 upper 最小間距
+    
+    # 指標權重（用於加權選擇最佳組合）
+    metric_weights: Dict[str, float] = field(default_factory=lambda: {
+        "auc": 0.3,
+        "f1_reject": 0.3,
+        "zone_high_precision": 0.2,
+        "zone_low_recall": 0.2,
+    })
+    
+    def to_dict(self) -> Dict:
+        return {
+            "version": self.version,
+            "lower_thresholds": self.lower_thresholds,
+            "upper_thresholds": self.upper_thresholds,
+            "min_threshold_gap": self.min_threshold_gap,
+            "metric_weights": self.metric_weights,
+        }
+    
+    def get_threshold_grid(self) -> List[Dict[str, float]]:
+        """產生有效的 threshold 組合"""
+        grid = []
+        for lower in self.lower_thresholds:
+            for upper in self.upper_thresholds:
+                if upper - lower >= self.min_threshold_gap:
+                    grid.append({"lower": lower, "upper": upper})
+        return grid
+
+
+# ============================================
+# Monitoring Config
+# ============================================
+@dataclass
+class MonitoringConfigV2:
+    """
+    Production Monitoring 設定 (V2)
+    
+    包含 Retraining Trigger 閾值
+    """
+    version: str = "2.0.0"
+    
+    # Metric Triggers (低於閾值觸發 retraining)
+    min_auc: float = 0.85               # ← 提高（原 0.75），AUC 低於 0.85 即需檢視
+    min_f1_reject: float = 0.30         # ← 提高（原 0.20），reject 辨識力門檻
+    max_score_psi: float = 0.25
+    
+    # Time Trigger
+    retrain_interval_months: int = 6  # 每 6 個月強制 review
+    
+    # Warning Thresholds (不觸發 retraining，但要警示)
+    warning_auc: float = 0.88           # ← 提高（原 0.80）
+    warning_score_psi: float = 0.10
+    warning_zone_shift: float = 0.10    # ← 降低（原 0.15），更敏感偵測 zone 變化
+    
+    # Default Zone Thresholds
+    default_lower_threshold: float = 0.5   # ← 提高（原 0.4），搭配更嚴格的三區分配
+    default_upper_threshold: float = 0.85  # ← 提高（原 0.7），避免 96%+ 自動核准
+    
+    # PSI 計算設定
+    psi_n_bins: int = 10
+    
+    # Calibration 檢查
+    calibration_tolerance: float = 0.05  # 預測與實際差異容忍度
+    
+    def to_dict(self) -> Dict:
+        return {
+            "version": self.version,
+            "metric_triggers": {
+                "min_auc": self.min_auc,
+                "min_f1_reject": self.min_f1_reject,
+                "max_score_psi": self.max_score_psi,
+            },
+            "time_trigger": {
+                "retrain_interval_months": self.retrain_interval_months,
+            },
+            "warning_thresholds": {
+                "warning_auc": self.warning_auc,
+                "warning_score_psi": self.warning_score_psi,
+                "warning_zone_shift": self.warning_zone_shift,
+            },
+            "default_zone_thresholds": {
+                "lower": self.default_lower_threshold,
+                "upper": self.default_upper_threshold,
+            },
+        }
+
+
+# ============================================
+# Diagnostics Config
+# ============================================
+@dataclass
+class DiagnosticsConfig:
+    """
+    Overfitting / Robustness Diagnostics 設定
+    """
+    version: str = "1.0.0"
+    
+    # Overfitting Detection
+    max_train_test_gap: float = 0.05   # Train-Test AUC 最大差距
+    max_train_oot_gap: float = 0.08    # Train-OOT AUC 最大差距
+    
+    # Stability Detection
+    max_cycle_std: float = 0.03        # Cycle 間 AUC 標準差上限
+    min_cycles_for_stable: int = 5     # 判斷穩定需要的最少 cycle 數
+    
+    # Calibration Check
+    max_calibration_error: float = 0.05  # Brier Score 容忍上限
+    
+    # Score Distribution Shift
+    max_score_distribution_shift: float = 0.15
+    
+    def to_dict(self) -> Dict:
+        return {
+            "version": self.version,
+            "overfitting": {
+                "max_train_test_gap": self.max_train_test_gap,
+                "max_train_oot_gap": self.max_train_oot_gap,
+            },
+            "stability": {
+                "max_cycle_std": self.max_cycle_std,
+                "min_cycles_for_stable": self.min_cycles_for_stable,
+            },
+            "calibration": {
+                "max_calibration_error": self.max_calibration_error,
+            },
+        }
+
+
+# ============================================
+# Model Training Config
+# ============================================
+@dataclass
+class ModelTrainingConfig:
+    """
+    模型訓練設定
+    """
+    version: str = "2.0.0"
+    
+    # 模型類型
+    model_type: str = "xgboost"
+    
+    # XGBoost 預設參數
+    xgboost_params: Dict[str, Any] = field(default_factory=lambda: {
+        "objective": "binary:logistic",
+        "eval_metric": "auc",
+        "max_depth": 4,
+        "learning_rate": 0.05,
+        "n_estimators": 150,
+        "subsample": 0.8,
+        "colsample_bytree": 0.8,
+        "min_child_weight": 10,
+        "reg_alpha": 0.1,
+        "reg_lambda": 1.0,
+        "random_state": 42,
+        "n_jobs": -1,
+        "verbosity": 0,
+    })
+    
+    # Time-Based CV 設定
+    cv_n_splits: int = 5
+    cv_gap: int = 0  # train 與 test 之間的間隔月數
+    
+    # Early Stopping
+    early_stopping_rounds: int = 20
+    
+    # Random Seed
+    random_seed: int = 42
+    
+    def to_dict(self) -> Dict:
+        return {
+            "version": self.version,
+            "model_type": self.model_type,
+            "xgboost_params": self.xgboost_params,
+            "cv": {
+                "n_splits": self.cv_n_splits,
+                "gap": self.cv_gap,
+            },
+            "early_stopping_rounds": self.early_stopping_rounds,
+            "random_seed": self.random_seed,
         }
 
 
@@ -510,14 +778,29 @@ class PipelineRunMetadata:
 # Config Manager
 # ============================================
 class ConfigManager:
-    """設定管理器"""
+    """
+    設定管理器
+    
+    包含兩組時間設定：
+    - time_period  (TimePeriodConfig)  — LEGACY：Gold Layer 資料切分用
+    - phase_config (PhaseConfigV2)     — ACTIVE：四階段訓練主設定
+    """
     
     def __init__(self, config_path: Optional[Path] = None):
         self.schema_contract = SchemaContract()
         self.data_quality = DataQualityThresholds()
         self.feature_encoding = FeatureEncodingConfig()
         self.feature_definition = FeatureDefinitionConfig()
+        
+        # LEGACY — 僅供 Gold Layer 向後相容
         self.time_period = TimePeriodConfig()
+        
+        # ACTIVE — 四階段訓練主設定
+        self.phase_config = PhaseConfigV2()
+        self.threshold_grid = ThresholdGridConfig()
+        self.monitoring = MonitoringConfigV2()
+        self.diagnostics = DiagnosticsConfig()
+        self.model_training = ModelTrainingConfig()
         
         if config_path and config_path.exists():
             self.load_from_file(config_path)
@@ -542,6 +825,42 @@ class ConfigManager:
                 step_months=tp.get('step_months', 2),
             )
         
+        # V2 Config Loading
+        if 'phase_config' in config:
+            pc = config['phase_config']
+            self.phase_config = PhaseConfigV2(
+                data_start=date.fromisoformat(pc.get('data_start', '2024-04-01')),
+                data_end=date.fromisoformat(pc.get('data_end', '2026-03-31')),
+                development_months=pc.get('development_months', 18),
+                policy_months=pc.get('policy_months', 4),
+                holdout_months=pc.get('holdout_months', 2),
+            )
+        
+        if 'threshold_grid' in config:
+            tg = config['threshold_grid']
+            self.threshold_grid = ThresholdGridConfig(
+                lower_thresholds=tg.get('lower_thresholds', [0.30, 0.40, 0.50, 0.60, 0.70, 0.80]),
+                upper_thresholds=tg.get('upper_thresholds', [0.70, 0.80, 0.85, 0.90, 0.95]),
+                min_threshold_gap=tg.get('min_threshold_gap', 0.15),
+            )
+        
+        if 'monitoring' in config:
+            mc = config['monitoring']
+            self.monitoring = MonitoringConfigV2(
+                min_auc=mc.get('min_auc', 0.85),
+                min_f1_reject=mc.get('min_f1_reject', 0.30),
+                max_score_psi=mc.get('max_score_psi', 0.25),
+                retrain_interval_months=mc.get('retrain_interval_months', 6),
+            )
+        
+        if 'diagnostics' in config:
+            dc = config['diagnostics']
+            self.diagnostics = DiagnosticsConfig(
+                max_train_test_gap=dc.get('max_train_test_gap', 0.05),
+                max_train_oot_gap=dc.get('max_train_oot_gap', 0.08),
+                max_cycle_std=dc.get('max_cycle_std', 0.03),
+            )
+        
         logger.info(f"Config loaded from: {path}")
     
     def save_to_file(self, path: Path):
@@ -558,6 +877,12 @@ class ConfigManager:
                 "target_column": self.feature_definition.target_column,
                 "key_columns": self.feature_definition.key_columns,
             },
+            # V2 Config
+            "phase_config": self.phase_config.to_dict(),
+            "threshold_grid": self.threshold_grid.to_dict(),
+            "monitoring": self.monitoring.to_dict(),
+            "diagnostics": self.diagnostics.to_dict(),
+            "model_training": self.model_training.to_dict(),
         }
         
         with open(path, 'w', encoding='utf-8') as f:
@@ -579,6 +904,16 @@ class ConfigManager:
             for col in self.feature_definition.high_cardinality_features
         ])
         return features
+    
+    def get_v2_config_summary(self) -> Dict:
+        """取得 V2 設定摘要"""
+        return {
+            "phase_config": self.phase_config.to_dict(),
+            "threshold_grid": self.threshold_grid.to_dict(),
+            "monitoring": self.monitoring.to_dict(),
+            "diagnostics": self.diagnostics.to_dict(),
+            "model_training": self.model_training.to_dict(),
+        }
 
 
 # 建立預設 config 實例

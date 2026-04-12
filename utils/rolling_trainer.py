@@ -1,6 +1,16 @@
 """
-Rolling Training Module
-=======================
+Rolling Training Module (LEGACY)
+=================================
+⚠️ 此模組為 legacy / backward compatibility 用途。
+⚠️ 正式主訓練架構已改用 four_phase_trainer.py (FourPhaseTrainer)。
+
+保留原因：
+1. 向後相容：部分 notebook / 分析腳本可能仍引用此模組
+2. Baseline 比較：可作為單純 rolling training 的 baseline
+
+如果你正在開發新功能，請使用 four_phase_trainer.py。
+
+原始功能說明：
 實作真正的 Rolling Training Framework for Credit Scoring
 
 核心設計理念：

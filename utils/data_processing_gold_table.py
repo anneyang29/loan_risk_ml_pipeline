@@ -2,15 +2,23 @@
 Gold Layer: 模型特徵準備與資料切分
 ==================================
 從 Silver 讀取資料，進行：
-- Dev / OOT 切分
+- Development / OOT 切分
 - Frequency Encoding（高基數類別）
 - Cross Features（交互特徵）
 - MinMax Scaling（標準化）
-- Rolling Windows 定義
+- Rolling Windows 定義（僅針對 Development period）
 - Transformation Artifacts 儲存
 - Data Drift 監控
 
-Version: 1.0.0
+命名對齊說明（Four Phase Architecture）：
+- Gold 層產出 "development" 和 "oot" 兩個分區
+- "oot" 是 legacy 命名，在四階段架構中對應：
+    - 前 2/3 → policy_validation（Phase 3：threshold / zone policy tuning）
+    - 後 1/3 → final_holdout（Phase 4：untouched blind evaluation）
+- 真正的 phase 切分由 FourPhaseTrainer 在訓練時執行
+- Rolling windows 只針對 development period 產生
+
+Version: 1.1.0
 """
 
 import logging
@@ -94,6 +102,12 @@ def split_dev_oot(
 ) -> Tuple[DataFrame, DataFrame]:
     """
     切分 Development 和 OOT 資料集
+    
+    命名說明：
+    - "oot" 是 Gold 層的 legacy 命名
+    - 在四階段架構中，oot 會由 FourPhaseTrainer 進一步切為：
+        - policy_validation（前 2/3）
+        - final_holdout（後 1/3）
     
     Args:
         df: Silver DataFrame
@@ -380,6 +394,14 @@ def save_gold_outputs(
     """
     儲存 Gold Layer 輸出
     
+    輸出結構：
+    - gold/development/  → Development period 資料（Phase 1 Rolling + Phase 2 Retraining 使用）
+    - gold/oot/          → Out-of-Time 資料（Phase 3 Policy Validation + Phase 4 Final Holdout 使用）
+    - gold/rolling_window_definition.csv → Rolling windows 定義（僅 development period）
+    
+    注意："oot" 是 Gold 層的統一輸出命名。
+    四階段架構中的 policy_validation / final_holdout 切分由 FourPhaseTrainer 在訓練時執行。
+    
     Returns:
         輸出路徑字典
     """
@@ -398,8 +420,8 @@ def save_gold_outputs(
     df_dev_final.write.mode("overwrite").partitionBy("進件年月").parquet(str(gold_dev_path))
     output_paths["development"] = gold_dev_path
     
-    # 2. 儲存 OOT（按月份）
-    logger.info("儲存 OOT...")
+    # 2. 儲存 OOT（按月份）— legacy storage name
+    logger.info("儲存 OOT (legacy storage name → FourPhaseTrainer 會拆為 policy_validation + final_holdout)...")
     df_oot_final.write.mode("overwrite").partitionBy("進件年月").parquet(str(gold_oot_path))
     output_paths["oot"] = gold_oot_path
     
@@ -417,6 +439,33 @@ def save_gold_outputs(
     ])
     rolling_windows_pd.to_csv(str(gold_window_csv), index=False, encoding="utf-8")
     output_paths["rolling_windows"] = gold_window_csv
+    
+    # 4. Gold Split Manifest（命名對齊文件）
+    import json as _json
+    manifest = {
+        "gold_layer_version": "1.1.0",
+        "split_directories": {
+            "development": str(gold_dev_path),
+            "oot": str(gold_oot_path),
+        },
+        "naming_note": (
+            "'oot' 是 Gold Layer 的統一輸出命名。"
+            "四階段架構中，FourPhaseTrainer 會將 oot 再切分為 "
+            "policy_validation（前 2/3）和 final_holdout（後 1/3）。"
+        ),
+        "four_phase_mapping": {
+            "development": "Phase 1 (Rolling Training) + Phase 2 (Champion Retraining)",
+            "oot_front_2_3": "Phase 3 (Policy Validation / Threshold Tuning)",
+            "oot_back_1_3": "Phase 4 (Final Blind Holdout)",
+        },
+        "rolling_window_definition": str(gold_window_csv),
+        "generated_at": datetime.now().isoformat(),
+    }
+    manifest_path = project_root / "datamart" / "gold" / "gold_split_manifest.json"
+    with open(str(manifest_path), "w", encoding="utf-8") as f:
+        _json.dump(manifest, f, ensure_ascii=False, indent=2)
+    output_paths["manifest"] = manifest_path
+    logger.info(f"Gold Split Manifest 已儲存: {manifest_path}")
     
     return output_paths
 
@@ -493,8 +542,9 @@ def run_gold_pipeline(
         # ============================================
         # 2. Dev / OOT 切分
         # ============================================
-        logger.info("切分 Dev / OOT...")
-        logger.info(f"  - OOT 起始日期: {oot_start} (來自 config)")
+        logger.info("切分 Development / OOT（OOT 為 legacy storage name）...")
+        logger.info(f"  - OOT 起始日期: {oot_start} (來自 config.time_period — LEGACY)")
+        logger.info(f"  - OOT 在四階段架構中會由 FourPhaseTrainer 拆為 policy_validation + final_holdout")
         df_dev, df_oot = split_dev_oot(df, oot_start)
         
         # ============================================
@@ -636,7 +686,10 @@ def run_gold_pipeline(
                 config.feature_definition.high_cardinality_features
             )
             unseen_report_path = project_root / "datamart" / "gold" / "reports" / f"unseen_categories_{run_id}.json"
-            unseen_report.save(unseen_report_path)
+            unseen_report_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(unseen_report_path, 'w', encoding='utf-8') as f:
+                import json
+                json.dump(unseen_report, f, ensure_ascii=False, indent=2)
             output_paths["unseen_report"] = unseen_report_path
             
             # 記錄警告

@@ -411,11 +411,11 @@ def compute_feature_statistics(
 @dataclass
 class ProductionMonitorConfig:
     """Production Monitoring 設定"""
-    min_auc: float = 0.75
-    min_f1_reject: float = 0.20
+    min_auc: float = 0.85              # 提高自 0.75
+    min_f1_reject: float = 0.30        # 提高自 0.20
     max_psi: float = 0.25
     retrain_interval_months: int = 6
-    warning_auc: float = 0.80
+    warning_auc: float = 0.88          # 提高自 0.80
     warning_psi: float = 0.10
 
 

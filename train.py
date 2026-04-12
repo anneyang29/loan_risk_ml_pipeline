@@ -1,26 +1,33 @@
 """
-Model Training - Entry Point
-============================
-XGBoost + Calibration 信用評分模型訓練
+Model Training - Legacy Entry Point
+=====================================
+⚠️ 此檔案為 legacy / backward compatibility 用途。
+⚠️ 正式主訓練流程請使用 main.py (Four Phase Training Architecture)。
 
-Usage:
-    python train.py                              # 使用預設設定
-    python train.py --training-date 2026-04-08   # 指定訓練日期（模型版本）
-    python train.py --calibration sigmoid        # 使用 sigmoid calibration
-    python train.py --n-splits 10                # 10-fold CV
-    python train.py --config config/prod.yaml    # 使用設定檔
-    python train.py --compare                    # 比較所有模型
-    python train.py --list-models                # 列出所有模型
+如果你正在尋找正式的訓練入口：
+    python main.py                     # 完整流程
+    python main.py --train-only        # 只跑訓練
+
+此檔案保留的原因：
+1. 向後相容：已有的 CI/CD 或 script 可能仍引用 train.py
+2. Model Registry 操作：--list-models / --compare / --set-best 等指令仍可用
+
+術語提醒：
+- 主訓練架構已改用 FourPhaseTrainer（four_phase_trainer.py）
+- Champion Strategy = 模型 + imbalance strategy + 設定組合
+- Final Champion Artifact = 用 Champion Strategy 在完整 development data 重訓的模型檔案
+
+Version: LEGACY (請改用 main.py)
 """
 
 import argparse
 import logging
+import sys
 from pathlib import Path
 from datetime import datetime
 
-from pyspark.sql import SparkSession
-
-from utils.model_train import run_model_training, CreditScoringModelTrainer
+# 正式主流程 import
+from utils.four_phase_trainer import FourPhaseTrainer, run_four_phase_pipeline
 from utils.model_registry import ModelRegistry
 from utils.config import ConfigManager, CONFIG_VERSION
 
@@ -30,14 +37,6 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
-
-
-def create_spark_session() -> SparkSession:
-    """建立 Spark Session"""
-    return SparkSession.builder \
-        .appName("model_training") \
-        .config("spark.driver.memory", "4g") \
-        .getOrCreate()
 
 
 def parse_args():
@@ -224,96 +223,28 @@ def main():
             return
     
     # ============================================
-    # 模型訓練
+    # 模型訓練 → 轉接到 Four Phase Pipeline
     # ============================================
-    
-    # 生成 run_id 和 training_date
-    run_id = args.run_id or datetime.now().strftime("%Y%m%d_%H%M%S")
-    training_date = args.training_date or datetime.now().strftime("%Y-%m-%d")
-    
-    # 載入設定
-    config = None
-    if args.config:
-        config_path = Path(args.config)
-        if config_path.exists():
-            config = ConfigManager(config_path)
-            logger.info(f"載入設定檔: {config_path}")
-        else:
-            logger.warning(f"設定檔不存在: {config_path}，使用預設設定")
-    
-    # 組合 XGBoost 參數
-    xgb_params = {
-        "n_estimators": args.n_estimators,
-        "max_depth": args.max_depth,
-        "learning_rate": args.learning_rate,
-        "min_child_weight": args.min_child_weight,
-        "subsample": args.subsample,
-        "colsample_bytree": args.colsample_bytree,
-        "reg_alpha": args.reg_alpha,
-        "reg_lambda": args.reg_lambda,
-        "objective": "binary:logistic",
-        "eval_metric": "auc",
-        "use_label_encoder": False,
-        "n_jobs": -1,
-    }
-    
-    # 顯示設定
+    logger.warning("=" * 70)
+    logger.warning("⚠️  train.py 是 legacy entry point")
+    logger.warning("⚠️  正式主流程請使用: python main.py")
+    logger.warning("⚠️  現在將轉接到 Four Phase Training Pipeline...")
+    logger.warning("=" * 70)
+
+    results = run_four_phase_pipeline(
+        project_root=project_root,
+        imbalance_strategy="scale_weight",
+        lower_threshold=0.4,
+        upper_threshold=0.7,
+    )
+
+    logger.info("\n" + "=" * 70)
+    logger.info("🎉 訓練完成！（透過 Four Phase Pipeline）")
     logger.info("=" * 70)
-    logger.info("🚀 Credit Scoring Model Training")
+    if results:
+        logger.info(f"Champion Strategy: {results.get('champion_strategy', 'N/A')}")
+        logger.info(f"Output: {results.get('output_dir', 'N/A')}")
     logger.info("=" * 70)
-    logger.info(f"Config Version: {CONFIG_VERSION}")
-    logger.info(f"Training Date: {training_date}")
-    logger.info(f"Model Version: credit_model_{training_date.replace('-', '_')}")
-    logger.info(f"Run ID: {run_id}")
-    logger.info(f"Calibration: {args.calibration}")
-    logger.info(f"CV Folds: {args.n_splits}")
-    logger.info("-" * 70)
-    logger.info("XGBoost Parameters:")
-    for k, v in xgb_params.items():
-        logger.info(f"  {k}: {v}")
-    logger.info("=" * 70)
-    
-    # 建立 Spark Session
-    spark = create_spark_session()
-    
-    try:
-        # 執行訓練
-        model_path = run_model_training(
-            project_root=project_root,
-            spark=spark,
-            config=config,
-            run_id=run_id,
-            training_date=training_date,
-            n_splits=args.n_splits,
-            calibration_method=args.calibration,
-            xgb_params=xgb_params,
-            auto_select_best=not args.no_auto_best,
-        )
-        
-        logger.info("\n" + "=" * 70)
-        logger.info("🎉 訓練完成！")
-        logger.info("=" * 70)
-        logger.info(f"模型版本: credit_model_{training_date.replace('-', '_')}")
-        logger.info(f"模型儲存於: {model_path}")
-        logger.info("")
-        logger.info("輸出檔案:")
-        logger.info(f"  - model.pkl              (Calibrated Model)")
-        logger.info(f"  - base_model.pkl         (Base XGBoost for SHAP)")
-        logger.info(f"  - model_artifact.json    (Metadata)")
-        logger.info(f"  - feature_importance.csv (特徵重要性)")
-        logger.info(f"  - training_report.json   (訓練報告)")
-        logger.info("")
-        logger.info("Model Registry:")
-        logger.info(f"  - model_bank/registry.json")
-        logger.info(f"  - model_bank/best_model.txt")
-        logger.info("=" * 70)
-        
-    except Exception as e:
-        logger.error(f"訓練失敗: {e}")
-        raise
-        
-    finally:
-        spark.stop()
 
 
 if __name__ == "__main__":

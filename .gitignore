@@ -55,9 +55,13 @@ conda-env/
 .ipynb_checkpoints/
 *.ipynb_checkpoints/
 
-# Notebook 檔案（不進版控）
-notebooks/*.ipynb
+# 所有 notebook 檔案不進版控
 *.ipynb
+
+# ============================================
+# Documentation (本地文件不進版控)
+# ============================================
+docs/
 
 # ============================================
 # Spark / PySpark
@@ -68,44 +72,15 @@ derby.log
 *.crc
 
 # ============================================
-# Data Files (大型資料不進版控)
+# Data Files (所有資料不進版控)
 # ============================================
-# 原始資料
-data/raw/*.csv
-data/raw/*.xlsx
-data/raw/*.xls
-data/raw/*.parquet
-data/*.xlsx
-data/*.csv
-data/*.xls
-
-# Datamart 輸出（可重新生成）
-datamart/bronze/
-datamart/silver/
-datamart/gold/
-
-# Audit logs（可重新生成）
-datamart/**/audit/
-datamart/**/reports/
+data/
+datamart/
 
 # ============================================
-# Model Artifacts
+# Model Bank (所有訓練產出不進版控)
 # ============================================
-# 舊的 models 資料夾
-models/
-
-# Model Bank（模型太大，但保留 registry）
-model_bank/**/model.pkl
-model_bank/**/base_model.pkl
-model_bank/**/model.joblib
-model_bank/audit/
-
-# 保留 registry 和 metadata（重要！）
-!model_bank/registry.json
-!model_bank/best_model.txt
-!model_bank/**/model_artifact.json
-!model_bank/**/training_report.json
-!model_bank/**/feature_importance.csv
+model_bank/
 
 # ============================================
 # Logs & Reports
