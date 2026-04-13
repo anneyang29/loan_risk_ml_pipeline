@@ -109,6 +109,7 @@ def load_active_baseline_metrics(project_root: Optional[Path] = None) -> Dict:
                 h = meta.get("holdout_metrics", {})
                 bc = meta.get("business_constraints", {})
                 t = meta.get("threshold_policy", {})
+                rc = meta.get("rolling_cv_metrics", {})
                 metrics = {
                     "auc":                      h.get("auc", 0.0),
                     "f1_reject":                h.get("f1_reject", 0.0),
@@ -121,13 +122,16 @@ def load_active_baseline_metrics(project_root: Optional[Path] = None) -> Dict:
                                                   h.get("low_zone_reject_precision", 0.0)),
                     "high_zone_approve_precision": bc.get("high_zone_precision",
                                                     h.get("high_zone_approve_precision", 0.0)),
-                    # zone ratio
+                    # explicit per-zone population ratios
                     "manual_review_ratio":      bc.get("manual_review_load", 0.0),
-                    "high_zone_ratio":          bc.get("auto_decision_rate", 0.0),  # approx
+                    "high_zone_ratio":          bc.get("high_zone_ratio", 0.0),
                     "low_zone_ratio":           bc.get("low_zone_ratio", 0.0),
                     # stability
-                    "rolling_stability_score":  meta.get("rolling_cv_metrics", {}).get("stability_score", 0.0),
-                    "avg_monitor_f1_reject":    meta.get("rolling_cv_metrics", {}).get("avg_monitor_f1_reject", 0.0),
+                    "avg_monitor_auc":          rc.get("avg_monitor_auc", 0.0),
+                    "avg_monitor_f1_reject":    rc.get("avg_monitor_f1_reject", 0.0),
+                    "rolling_stability_score":  rc.get("stability_score", 0.0),
+                    # feature count (for report headers)
+                    "feature_count":            meta.get("champion_model", {}).get("feature_count", 0),
                     # thresholds
                     "lower_threshold":          t.get("lower_threshold", 0.5),
                     "upper_threshold":          t.get("upper_threshold", 0.85),
@@ -577,11 +581,21 @@ def compare_against_baseline(
     upgrade_reason: Optional[str] = None,
     suitable_routing: Optional[bool] = None,
     suitable_replace: Optional[bool] = None,
+    baseline_label: Optional[str] = None,
 ) -> str:
     """
     Generate a plain-text Markdown comparison report.
     No emoji or icon characters in output.
+
+    Args:
+        baseline_label: Human-readable name for the baseline column, e.g. "baseline_v2".
+                        Defaults to the _source field in baseline_metrics, or "Active Baseline".
     """
+    bl_label = (
+        baseline_label
+        or baseline_metrics.get("_source", "").replace("active_baseline:", "").strip()
+        or "Active Baseline"
+    )
     lines: List[str] = []
     lines.append(f"# Challenger vs Baseline Comparison: {challenger_id}")
     lines.append(f"\nGenerated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
@@ -594,9 +608,10 @@ def compare_against_baseline(
     # Feature changes
     lines.append("## 1. Feature Changes")
     lines.append("")
-    lines.append("| | Baseline v1 | Challenger |")
+    lines.append(f"| | {bl_label} | Challenger |")
     lines.append("|--|-------------|------------|")
-    lines.append(f"| Feature count | 25 | {challenger_features_remaining} |")
+    bl_feature_count = int(baseline_metrics.get("feature_count", 25))
+    lines.append(f"| Feature count | {bl_feature_count} | {challenger_features_remaining} |")
     lines.append(f"| Features dropped | 0 | {len(challenger_features_dropped)} |")
     lines.append("")
     if challenger_features_dropped:
@@ -608,7 +623,7 @@ def compare_against_baseline(
     # Classifier metrics
     lines.append("## 2. Classifier Metrics (Final Holdout)")
     lines.append("")
-    lines.append("| Metric | Baseline v1 | Challenger | Delta | Result |")
+    lines.append(f"| Metric | {bl_label} | Challenger | Delta | Result |")
     lines.append("|--------|-------------|------------|-------|--------|")
 
     classifier_pairs = [
@@ -640,7 +655,7 @@ def compare_against_baseline(
     lines.append("")
     lines.append("### 3-A. Zone Precision (purity within each zone)")
     lines.append("")
-    lines.append("| Metric | Description | Baseline v1 | Challenger | Delta | Result |")
+    lines.append(f"| Metric | Description | {bl_label} | Challenger | Delta | Result |")
     lines.append("|--------|-------------|-------------|------------|-------|--------|")
 
     bv = baseline_metrics.get("low_zone_reject_precision")
@@ -657,7 +672,7 @@ def compare_against_baseline(
     lines.append("")
     lines.append("### 3-B. Zone Ratio (each zone as fraction of total cases)")
     lines.append("")
-    lines.append("| Zone | Baseline v1 | Challenger | Delta | Note |")
+    lines.append(f"| Zone | {bl_label} | Challenger | Delta | Note |")
     lines.append("|------|-------------|------------|-------|------|")
 
     bl_h = baseline_metrics.get("high_zone_ratio", 0.0)
@@ -684,10 +699,14 @@ def compare_against_baseline(
     # Stability
     lines.append("## 4. Rolling Stability")
     lines.append("")
-    lines.append("| Metric | Baseline v1 | Challenger | Delta | Result |")
+    lines.append(f"| Metric | {bl_label} | Challenger | Delta | Result |")
     lines.append("|--------|-------------|------------|-------|--------|")
 
-    bl_stab = {"avg_monitor_auc": 0.8644, "avg_monitor_f1_reject": 0.2714, "stability_score": 0.0308}
+    bl_stab = {
+        "avg_monitor_auc":      baseline_metrics.get("avg_monitor_auc", 0.8644),
+        "avg_monitor_f1_reject": baseline_metrics.get("avg_monitor_f1_reject", 0.2714),
+        "stability_score":      baseline_metrics.get("rolling_stability_score", 0.0308),
+    }
     for name, bl_key, higher_better in [
         ("Avg Monitor AUC",    "avg_monitor_auc",      True),
         ("Avg Monitor F1r",    "avg_monitor_f1_reject", True),
@@ -763,10 +782,10 @@ def compare_against_baseline(
         elif not higher_better and delta > 0.001:
             regressed.append(f"  {metric} ({category}): {bv:.4f} -> {cv:.4f} ({delta:+.4f})")
 
-    lines.append("### Improvements vs Baseline v1")
+    lines.append(f"### Improvements vs {bl_label}")
     lines += (improved if improved else ["  None"])
     lines.append("")
-    lines.append("### Regressions vs Baseline v1")
+    lines.append(f"### Regressions vs {bl_label}")
     lines += (regressed if regressed else ["  None"])
     lines.append("")
 
@@ -804,10 +823,16 @@ def generate_routing_report(
     best_candidate: Dict,
     baseline_metrics: Dict,
     output_dir: Path,
+    baseline_label: Optional[str] = None,
 ) -> str:
     """
     Generate a concise human-readable routing report (plain text, no emoji).
     """
+    bl_label = (
+        baseline_label
+        or baseline_metrics.get("_source", "").replace("active_baseline:", "").strip()
+        or "Active Baseline"
+    )
     hz  = best_candidate.get("high_zone_ratio", 0.0)
     mz  = best_candidate.get("manual_zone_ratio", best_candidate.get("manual_review_ratio", 0.0))
     lz  = best_candidate.get("low_zone_ratio", 0.0)
@@ -823,6 +848,7 @@ def generate_routing_report(
     lines = [
         f"# Routing Report: {challenger_id}",
         f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+        f"Reference baseline: {bl_label}",
         "",
         "## Zone Distribution",
         f"  High zone (auto-approve eligible) : {hz:.1%}",
@@ -830,7 +856,7 @@ def generate_routing_report(
         f"  Low zone (enhanced review pool)    : {lz:.1%}",
         f"  -----------------------------------------------",
         f"  Total human review workload        : {wl:.1%}  (manual + low)",
-        f"  vs Baseline v1 human workload      : {bl_wl:.1%}",
+        f"  vs {bl_label} human workload       : {bl_wl:.1%}",
         f"  Delta                              : {(wl - bl_wl):+.1%}",
         "",
         "## Zone Precision",
@@ -838,8 +864,8 @@ def generate_routing_report(
         f"  low_zone_reject_precision   : {lzp:.4f}  (target >= 0.65)",
         "",
         "## Classifier Metrics",
-        f"  Holdout AUC      : {auc:.4f}  (baseline: {baseline_metrics.get('auc', 0):.4f})",
-        f"  Holdout F1_reject: {f1r:.4f}  (baseline: {baseline_metrics.get('f1_reject', 0):.4f})",
+        f"  Holdout AUC      : {auc:.4f}  ({bl_label}: {baseline_metrics.get('auc', 0):.4f})",
+        f"  Holdout F1_reject: {f1r:.4f}  ({bl_label}: {baseline_metrics.get('f1_reject', 0):.4f})",
         "",
         "## Upgrade Candidate",
         f"  upgrade_candidate: {uc}",
@@ -865,7 +891,7 @@ def generate_routing_report(
 
     lines += [
         "",
-        "## Improvement vs Baseline",
+        f"## Improvement vs {bl_label}",
         f"  - low_zone_reject_precision: {baseline_metrics.get('low_zone_reject_precision', 0):.4f} -> {lzp:.4f}",
         f"  - human_review_workload_ratio: {bl_wl:.1%} -> {wl:.1%}",
         f"  - AUC: {baseline_metrics.get('auc', 0):.4f} -> {auc:.4f}",
@@ -895,7 +921,7 @@ def run_c2_feature_pruning_challenger(
 
     - Drops 6 unstable / low-importance features (25 -> 19)
     - Reruns the full four-phase pipeline
-    - Compares against baseline v1
+    - Compares against the active baseline (loaded dynamically)
     - Saves comparison report + metadata to model_bank/experiments/c2_feature_pruning/
 
     Returns dict with output_dir, comparison report path, and key metrics.
@@ -950,6 +976,8 @@ def run_c2_feature_pruning_challenger(
     challenger_output = project_root / "model_bank" / "experiments" / "c2_feature_pruning"
     challenger_output.mkdir(parents=True, exist_ok=True)
 
+    bl_label = baseline_metrics.get("_source", "").replace("active_baseline:", "").strip() or "Active Baseline"
+
     report = compare_against_baseline(
         challenger_id="C2_feature_pruning",
         challenger_desc="Remove 6 unstable/low-importance features (25 -> 19)",
@@ -964,6 +992,7 @@ def run_c2_feature_pruning_challenger(
         upgrade_reason=uc_reason,
         suitable_routing=suitable_r,
         suitable_replace=suitable_c,
+        baseline_label=bl_label,
     )
 
     routing_report = generate_routing_report(
@@ -971,6 +1000,7 @@ def run_c2_feature_pruning_challenger(
         best_candidate={**c2_holdout, **c2_zone, "upgrade_candidate": uc_status},
         baseline_metrics=baseline_metrics,
         output_dir=challenger_output,
+        baseline_label=bl_label,
     )
 
     # Metadata
@@ -980,7 +1010,7 @@ def run_c2_feature_pruning_challenger(
         "features_dropped": features_to_drop,
         "feature_count": len(feature_names),
         "features_remaining": feature_names,
-        "baseline_reference": "baseline_v1",
+        "baseline_reference": bl_label,
         "holdout_metrics": c2_holdout,
         "zone_metrics": c2_zone,
         "stability_metrics": c2_stability,
@@ -1409,9 +1439,11 @@ def run_c3_decision_tuning_challenger(
     best = passing[0] if passing else sorted_records[0]
 
     bl_workload = baseline_metrics["manual_review_ratio"] + baseline_metrics["low_zone_ratio"]
+    bl_label = baseline_metrics.get("_source", "").replace("active_baseline:", "").strip() or "Active Baseline"
 
     summary = {
         "challenger_id": "C3_decision_tuning",
+        "baseline_reference": bl_label,
         "created_at": datetime.now().isoformat(),
         "total_candidates_evaluated": len(all_records),
         "candidates_passing_hard_constraints": len(passing),
@@ -1450,6 +1482,11 @@ def run_c3_decision_tuning_challenger(
                     "c3_human_workload": best["human_review_workload_ratio"],
                     "delta": best["human_review_workload_ratio"] - bl_workload,
                 },
+            },
+            "stability": {
+                "avg_monitor_auc":       best["avg_monitor_auc"],
+                "avg_monitor_f1_reject": best["avg_monitor_f1_reject"],
+                "stability_score":       best["stability_score"],
             },
             "upgrade_candidate": best["upgrade_candidate"],
             "upgrade_reason": best["upgrade_reason"],
@@ -1511,6 +1548,7 @@ def run_c3_decision_tuning_challenger(
         upgrade_reason=best["upgrade_reason"],
         suitable_routing=best["suitable_for_routing_improvement"],
         suitable_replace=best["suitable_for_replacing_baseline_classifier"],
+        baseline_label=bl_label,
     )
 
     generate_routing_report(
@@ -1518,6 +1556,7 @@ def run_c3_decision_tuning_challenger(
         best_candidate=best,
         baseline_metrics=baseline_metrics,
         output_dir=output_dir,
+        baseline_label=bl_label,
     )
 
     try:

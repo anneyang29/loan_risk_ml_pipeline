@@ -18,14 +18,22 @@ Baseline lifecycle:
 - Use --create-baseline to manually create a named baseline from the latest run.
 - Challengers compare against the active baseline (dynamic loading, not hardcoded).
 
+Standard full lifecycle (python main.py):
+  A. Data Pipeline       Bronze -> Silver -> Gold
+  B. Baseline Pipeline   Four-phase training + auto-create/activate baseline
+  C. Challenger Stage    Run C2 -> Run C3 -> compare each against active baseline
+  D. Decision Summary    challenger_evaluation_summary.{json,md} in model_bank/experiments/
+  E. (optional)          Production Monitoring  [--all only]
+
 Usage:
-    python main.py                             # Data + Training (default)
-    python main.py --all                       # Data + Training + Monitoring
+    python main.py                             # Data + Training + Challenger Evaluation
+    python main.py --all                       # Data + Training + Challengers + Monitoring
     python main.py --data-only                 # Bronze -> Silver -> Gold only
     python main.py --train-only                # Four-phase training only
+    python main.py --challengers-only          # Challenger evaluation only (requires baseline)
     python main.py --monitor-only              # Production monitoring only
-    python main.py --run-c2                    # C2 Feature Pruning challenger
-    python main.py --run-c3                    # C3 Decision Tuning challenger
+    python main.py --run-c2                    # C2 Feature Pruning challenger (manual)
+    python main.py --run-c3                    # C3 Decision Tuning challenger (manual)
     python main.py --compare-baseline --challenger c2   # Comparison report only
     python main.py --compare-baseline --challenger c3   # Comparison report only
     python main.py --create-baseline                    # Create baseline from latest run
@@ -61,8 +69,6 @@ from utils.challenger_manager import (
     run_c2_feature_pruning_challenger,
     run_c3_decision_tuning_challenger,
     compare_against_baseline,
-    generate_routing_report,
-    C2_METRICS,
 )
 
 # 設定 logging
@@ -81,15 +87,30 @@ def _maybe_create_first_baseline(project_root: Path, training_results: dict):
     """
     Auto-create baseline_v1 after the first successful training run.
 
-    If any baseline already exists in the model_bank, this is a no-op.
-    If no baseline exists, creates 'baseline_v1' from the training run and activates it.
+    - If no baselines exist at all: create baseline_v1 and activate it.
+    - If baselines exist but active_baseline.json is missing: activate the most
+      recent baseline so the pipeline is not left in an ambiguous state.
+    - If an active baseline is already set: no-op.
     """
     from utils.baseline_manager import BaselineManager
 
     mgr = BaselineManager(str(project_root / "model_bank"))
-    if mgr.list_baselines():
-        return  # at least one baseline already exists
+    existing = mgr.list_baselines()
 
+    if existing:
+        # Baselines exist — check whether an active one is set
+        active = mgr.get_active_baseline()
+        if active is None:
+            # Orphaned state: folders exist but no active pointer — recover silently
+            most_recent = existing[-1]  # list_baselines() returns sorted names
+            try:
+                mgr.activate_baseline(most_recent)
+                print(f"\n  [Baseline] No active baseline was set; activated '{most_recent}'.")
+            except Exception as exc:
+                logger.warning("Could not recover active baseline: %s", exc)
+        return  # either already active, or just recovered above
+
+    # No baselines exist at all — auto-create baseline_v1
     run_dir = (training_results or {}).get("output_dir", "")
     if not run_dir:
         logger.warning("Cannot auto-create baseline: training results do not include output_dir.")
@@ -253,19 +274,26 @@ def run_monitoring_pipeline(
     """
     Run production monitoring.
 
-    Threshold resolution order:
-      1. zone_policy_summary.json (Phase 3 recommended)
-      2. champion_summary.json threshold_config
-      3. CLI --lower-threshold / --upper-threshold
-      4. ProductionMonitoringConfig defaults
+    Reference source resolution order:
+      1. Active baseline (model_bank/baselines/active_baseline.json)
+         - Uses active baseline's policy thresholds and policy_validation_predictions.csv
+         - This is the correct path once a baseline has been established
+      2. Latest training run directory (fallback when no baseline exists yet)
 
-    Baseline: policy_validation_predictions.csv (Phase 3, last labelled window before deployment).
-    Monitoring target (demo mode): final_holdout_predictions.csv.
+    Threshold override resolution (applied on top of reference source):
+      1. CLI --lower-threshold / --upper-threshold (if provided)
+      2. Active baseline thresholds  (from active_baseline.json)
+      3. zone_policy_summary.json from run dir  (fallback)
+      4. champion_summary.json threshold_config  (fallback)
+      5. ProductionMonitoringConfig defaults
+
+    Monitoring target (demo mode): final_holdout_predictions.csv from the reference run.
     In production, replace with actual production batch scoring data.
     """
     import json
     import numpy as np
     import pandas as pd
+    from utils.baseline_manager import BaselineManager
 
     if project_root is None:
         project_root = PROJECT_ROOT
@@ -279,73 +307,120 @@ def run_monitoring_pipeline(
         print("  WARNING: model_bank not found; run training pipeline first.")
         return None
 
-    run_dirs = sorted(
-        [d for d in model_bank.iterdir()
-         if d.is_dir() and (d.name.startswith("four_phase_") or d.name.startswith("rolling_training_v2_"))],
-        reverse=True,
-    )
-    if not run_dirs:
-        print("  WARNING: No training result directories found (four_phase_* or rolling_training_v2_*).")
-        return None
+    # ── Step 1: Resolve reference run directory ───────────────────────
+    # Prefer active baseline; fall back to latest training run.
+    reference_dir = None
+    reference_source = None
+    active_thresholds = {}
 
-    latest_dir = run_dirs[0]
-    print(f"  Using latest training results: {latest_dir.name}")
+    mgr = BaselineManager(str(model_bank))
+    active_info = mgr.get_active_baseline()
 
-    # Threshold resolution
-    resolved_lower = lower_threshold
+    if active_info:
+        baseline_name = active_info.get("active_baseline", "")
+        baseline_path = model_bank / "baselines" / baseline_name
+        if baseline_path.exists():
+            # Resolve the original run folder for holdout predictions
+            try:
+                meta = mgr.get_baseline_metadata(baseline_name)
+                run_id = meta.get("source_run", {}).get("run_folder", "")
+                run_folder = model_bank / run_id if run_id else None
+                if run_folder and run_folder.exists():
+                    reference_dir = run_folder
+                    reference_source = f"active baseline '{baseline_name}' -> run {run_id}"
+                else:
+                    # Fall back to the copied predictions inside the baseline dir
+                    reference_dir = baseline_path
+                    reference_source = f"active baseline '{baseline_name}' (copied files)"
+            except Exception as exc:
+                logger.warning("Could not resolve baseline run folder: %s", exc)
+
+            active_thresholds = {
+                "lower": active_info.get("thresholds", {}).get("lower"),
+                "upper": active_info.get("thresholds", {}).get("upper"),
+            }
+            print(f"  Reference : {reference_source}")
+        else:
+            print(f"  WARNING: Active baseline path not found: {baseline_path}")
+
+    if reference_dir is None:
+        run_dirs = sorted(
+            [d for d in model_bank.iterdir()
+             if d.is_dir() and (d.name.startswith("four_phase_") or d.name.startswith("rolling_training_v2_"))],
+            reverse=True,
+        )
+        if not run_dirs:
+            print("  WARNING: No training result directories found.")
+            return None
+        reference_dir = run_dirs[0]
+        reference_source = f"latest run '{reference_dir.name}' (no active baseline)"
+        print(f"  Reference : {reference_source}")
+
+    # ── Step 2: Resolve thresholds ────────────────────────────────────
+    resolved_lower = lower_threshold   # CLI takes top priority
     resolved_upper = upper_threshold
-    threshold_source = "default"
+    threshold_source = "CLI argument" if lower_threshold is not None else None
 
-    zone_policy_path = latest_dir / "zone_policy_summary.json"
-    champion_path    = latest_dir / "champion_summary.json"
+    if resolved_lower is None and active_thresholds.get("lower") is not None:
+        resolved_lower   = active_thresholds["lower"]
+        resolved_upper   = active_thresholds["upper"]
+        threshold_source = f"active baseline '{active_info.get('active_baseline', '')}' thresholds"
 
-    if zone_policy_path.exists():
-        zone_policy = json.loads(zone_policy_path.read_text(encoding="utf-8"))
-        if "selected_lower_threshold" in zone_policy:
-            resolved_lower   = zone_policy["selected_lower_threshold"]
-            resolved_upper   = zone_policy["selected_upper_threshold"]
-            threshold_source = "zone_policy_summary.json (Phase 3 recommended)"
-        elif "recommended_lower_threshold" in zone_policy:
-            resolved_lower   = zone_policy["recommended_lower_threshold"]
-            resolved_upper   = zone_policy["recommended_upper_threshold"]
-            threshold_source = "zone_policy_summary.json (recommended)"
-    elif champion_path.exists():
-        champion_info = json.loads(champion_path.read_text(encoding="utf-8"))
-        tc = champion_info.get("threshold_config", {})
-        if tc.get("lower_threshold") is not None:
-            resolved_lower   = tc["lower_threshold"]
-            resolved_upper   = tc["upper_threshold"]
-            threshold_source = "champion_summary.json"
-
-    if lower_threshold is not None:
-        resolved_lower   = lower_threshold
-        threshold_source = "CLI argument"
-    if upper_threshold is not None:
-        resolved_upper   = upper_threshold
-        threshold_source = "CLI argument"
+    if resolved_lower is None:
+        zone_policy_path = reference_dir / "zone_policy_summary.json"
+        champion_path    = reference_dir / "champion_summary.json"
+        if zone_policy_path.exists():
+            zone_policy = json.loads(zone_policy_path.read_text(encoding="utf-8"))
+            if "selected_lower_threshold" in zone_policy:
+                resolved_lower   = zone_policy["selected_lower_threshold"]
+                resolved_upper   = zone_policy["selected_upper_threshold"]
+                threshold_source = "zone_policy_summary.json (Phase 3 recommended)"
+            elif "recommended_lower_threshold" in zone_policy:
+                resolved_lower   = zone_policy["recommended_lower_threshold"]
+                resolved_upper   = zone_policy["recommended_upper_threshold"]
+                threshold_source = "zone_policy_summary.json (recommended)"
+        elif champion_path.exists():
+            champion_info = json.loads(champion_path.read_text(encoding="utf-8"))
+            tc = champion_info.get("threshold_config", {})
+            if tc.get("lower_threshold") is not None:
+                resolved_lower   = tc["lower_threshold"]
+                resolved_upper   = tc["upper_threshold"]
+                threshold_source = "champion_summary.json"
 
     if resolved_lower is None:
         resolved_lower = ProductionMonitoringConfig().default_lower_threshold
-    if resolved_upper is None:
         resolved_upper = ProductionMonitoringConfig().default_upper_threshold
+        threshold_source = "ProductionMonitoringConfig defaults"
 
     print(f"\n  Monitoring threshold:")
     print(f"    lower : {resolved_lower}")
     print(f"    upper : {resolved_upper}")
     print(f"    source: {threshold_source}")
 
-    pv_pred_path    = latest_dir / "policy_validation_predictions.csv"
-    holdout_pred_path = latest_dir / "final_holdout_predictions.csv"
-
-    if not pv_pred_path.exists():
-        print("  WARNING: policy_validation_predictions.csv not found.")
+    # ── Step 3: Locate baseline predictions file ──────────────────────
+    # Prefer policy/policy_validation_predictions.csv inside baseline dir,
+    # then root-level policy_validation_predictions.csv in the run folder.
+    def _find_pv_csv(d: Path) -> Path:
+        candidates = [
+            d / "policy" / "policy_validation_predictions.csv",
+            d / "policy_validation_predictions.csv",
+        ]
+        for c in candidates:
+            if c.exists():
+                return c
         return None
 
-    print(f"\n  Baseline source: {pv_pred_path}")
+    pv_pred_path = _find_pv_csv(reference_dir)
+    if pv_pred_path is None:
+        print("  WARNING: policy_validation_predictions.csv not found in reference dir.")
+        return None
+
+    print(f"\n  Baseline predictions: {pv_pred_path}")
     pv_df = pd.read_csv(pv_pred_path)
     baseline_scores = pv_df["pred_prob"].values
     print(f"    Rows: {len(baseline_scores)}  Mean score: {baseline_scores.mean():.4f}")
 
+    # ── Step 4: Set up monitor ────────────────────────────────────────
     config  = ProductionMonitoringConfig(
         default_lower_threshold=resolved_lower,
         default_upper_threshold=resolved_upper,
@@ -353,70 +428,272 @@ def run_monitoring_pipeline(
     monitor = ProductionMonitor(config=config)
     monitor.set_baseline(baseline_scores, resolved_lower, resolved_upper)
 
+    # Set last training date from champion metadata
+    champion_path = reference_dir / "champion_summary.json"
+    if not champion_path.exists():
+        champion_path = reference_dir / "metadata" / "champion_summary.json"
     if champion_path.exists():
         champion_info = json.loads(champion_path.read_text(encoding="utf-8"))
         monitor.set_last_training_date(champion_info.get("created_at", "")[:10])
 
-    if holdout_pred_path.exists():
-        print(f"\n  Monitoring target (demo): {holdout_pred_path}")
-        print("  NOTE: Replace with production batch scoring data in live deployment.")
+    # ── Step 5: Run monitoring against holdout data ───────────────────
+    def _find_holdout_csv(d: Path) -> Path:
+        candidates = [
+            d / "predictions" / "final_holdout_predictions.csv",
+            d / "final_holdout_predictions.csv",
+        ]
+        for c in candidates:
+            if c.exists():
+                return c
+        return None
 
-        holdout_df  = pd.read_csv(holdout_pred_path)
-        predictions = holdout_df["pred_prob"].values
-        labels      = holdout_df["actual_label"].values if "actual_label" in holdout_df.columns else None
-
-        result = monitor.run_production_monitoring(
-            predictions=predictions,
-            labels=labels,
-            model_version=latest_dir.name,
-            period_start=str(holdout_df["進件日"].min()) if "進件日" in holdout_df.columns else "",
-            period_end=str(holdout_df["進件日"].max()) if "進件日" in holdout_df.columns else "",
-            lower_threshold=resolved_lower,
-            upper_threshold=resolved_upper,
-        )
-
-        output_dir = project_root / "model_bank" / "monitoring"
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        ts          = datetime.now().strftime("%Y%m%d_%H%M%S")
-        result_path = output_dir / f"monitoring_result_{ts}.json"
-
-        result_dict = result.to_dict()
-        result_dict["threshold_config"] = {
-            "lower_threshold": resolved_lower,
-            "upper_threshold": resolved_upper,
-            "source": threshold_source,
-        }
-
-        result_path.write_text(
-            json.dumps(result_dict, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        print(f"  Monitoring result saved: {result_path}")
-
-        decision = {
-            "timestamp": ts,
-            "needs_retraining": result.needs_retraining,
-            "trigger_reason": result.retraining_trigger_reason,
-            "alerts": result.alerts,
-            "warnings": result.warnings,
-        }
-        if result.needs_retraining:
-            # 產生 dynamic retraining window
-            window = generate_retraining_data_window(
-                current_date=datetime.now().date()
-            )
-            decision["retraining_window"] = window
-
-        decision_path = output_dir / f"retraining_decision_{ts}.json"
-        decision_path.write_text(
-            json.dumps(decision, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        print(f"  Retraining decision saved: {decision_path}")
-
-        return result
-    else:
+    holdout_pred_path = _find_holdout_csv(reference_dir)
+    if holdout_pred_path is None:
         print("  WARNING: final_holdout_predictions.csv not found; monitoring skipped.")
         return None
+
+    print(f"\n  Monitoring target (demo): {holdout_pred_path}")
+    print("  NOTE: Replace with production batch scoring data in live deployment.")
+
+    holdout_df  = pd.read_csv(holdout_pred_path)
+    predictions = holdout_df["pred_prob"].values
+    labels      = holdout_df["actual_label"].values if "actual_label" in holdout_df.columns else None
+
+    result = monitor.run_production_monitoring(
+        predictions=predictions,
+        labels=labels,
+        model_version=reference_dir.name,
+        period_start=str(holdout_df["進件日"].min()) if "進件日" in holdout_df.columns else "",
+        period_end=str(holdout_df["進件日"].max()) if "進件日" in holdout_df.columns else "",
+        lower_threshold=resolved_lower,
+        upper_threshold=resolved_upper,
+    )
+
+    output_dir = project_root / "model_bank" / "monitoring"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    ts          = datetime.now().strftime("%Y%m%d_%H%M%S")
+    result_path = output_dir / f"monitoring_result_{ts}.json"
+
+    result_dict = result.to_dict()
+    result_dict["threshold_config"] = {
+        "lower_threshold": resolved_lower,
+        "upper_threshold": resolved_upper,
+        "source": threshold_source,
+    }
+    result_dict["reference_source"] = reference_source
+    if active_info:
+        result_dict["active_baseline"] = active_info.get("active_baseline")
+
+    result_path.write_text(
+        json.dumps(result_dict, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    print(f"  Monitoring result saved: {result_path}")
+
+    decision = {
+        "timestamp": ts,
+        "needs_retraining": result.needs_retraining,
+        "trigger_reason": result.retraining_trigger_reason,
+        "alerts": result.alerts,
+        "warnings": result.warnings,
+    }
+    if result.needs_retraining:
+        window = generate_retraining_data_window(
+            current_date=datetime.now().date()
+        )
+        decision["retraining_window"] = window
+
+    decision_path = output_dir / f"retraining_decision_{ts}.json"
+    decision_path.write_text(
+        json.dumps(decision, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    print(f"  Retraining decision saved: {decision_path}")
+
+    return result
+
+
+# ============================================
+# Challenger Evaluation Pipeline
+# ============================================
+
+def run_challenger_evaluation_pipeline(project_root: Path = None) -> dict:
+    """
+    Run the full challenger evaluation stage (C2 + C3) against the active baseline.
+
+    Steps:
+      1. Verify an active baseline exists — abort with a clear message if not.
+      2. Run C2 Feature Pruning challenger.
+      3. Run C3 Decision Tuning challenger.
+      4. Build a structured evaluation summary.
+      5. Write challenger_evaluation_summary.json and .md to
+         model_bank/experiments/.
+
+    Returns a dict with keys:
+      active_baseline, c2, c3, overall_recommendation, summary_path
+    """
+    import json
+    from utils.challenger_manager import load_active_baseline_metrics
+
+    if project_root is None:
+        project_root = PROJECT_ROOT
+
+    print("\n" + "=" * 70)
+    print("  Challenger Evaluation Stage")
+    print("=" * 70)
+
+    # ── Guard: need an active baseline ───────────────────────────────
+    baseline_metrics = load_active_baseline_metrics(project_root)
+    bl_label = (
+        baseline_metrics.get("_source", "")
+        .replace("active_baseline:", "")
+        .strip()
+        or "Active Baseline"
+    )
+    if bl_label == "Active Baseline":
+        print("  WARNING: No active baseline found.")
+        print("  Run training first so that baseline_v1 is created, then re-run.")
+        return {}
+
+    print(f"\n  Active baseline : {bl_label}")
+    print(f"  Baseline AUC    : {baseline_metrics.get('auc', 0):.4f}")
+    print(f"  Baseline F1_rej : {baseline_metrics.get('f1_reject', 0):.4f}")
+
+    # ── C2 ────────────────────────────────────────────────────────────
+    print("\n[C2] Feature Pruning challenger ...")
+    c2_result = {}
+    try:
+        c2_result = run_c2_feature_pruning_challenger(project_root=project_root) or {}
+        c2_status = c2_result.get("upgrade_candidate", "unknown")
+        print(f"  C2 result : {c2_status}")
+    except Exception as exc:
+        logger.error("C2 challenger failed: %s", exc)
+        c2_status = "error"
+        c2_result = {"upgrade_candidate": "error", "upgrade_reason": str(exc)}
+
+    # ── C3 ────────────────────────────────────────────────────────────
+    print("\n[C3] Decision Tuning challenger ...")
+    c3_result = {}
+    try:
+        c3_result = run_c3_decision_tuning_challenger(project_root=project_root) or {}
+        c3_status = c3_result.get("upgrade_candidate", "unknown")
+        print(f"  C3 result : {c3_status}")
+    except Exception as exc:
+        logger.error("C3 challenger failed: %s", exc)
+        c3_status = "error"
+        c3_result = {"upgrade_candidate": "error", "upgrade_reason": str(exc)}
+
+    # ── Overall recommendation ────────────────────────────────────────
+    # Priority: full_upgrade > routing_only_upgrade > reject
+    _rank = {"full_upgrade": 3, "routing_only_upgrade": 2, "reject": 1,
+             "unknown": 0, "error": 0}
+
+    best_challenger = None
+    best_status = "reject"
+    for cid, res in [("C2_feature_pruning", c2_result), ("C3_decision_tuning", c3_result)]:
+        st = res.get("upgrade_candidate", "reject")
+        if _rank.get(st, 0) > _rank.get(best_status, 0):
+            best_status = st
+            best_challenger = cid
+
+    if best_status == "full_upgrade":
+        overall = f"FULL UPGRADE CANDIDATE: {best_challenger} — recommend replacing baseline"
+    elif best_status == "routing_only_upgrade":
+        overall = f"ROUTING UPGRADE CANDIDATE: {best_challenger} — recommend routing policy update only"
+    else:
+        overall = "KEEP BASELINE — no challenger meets promotion criteria"
+
+    # ── Build summary dict ────────────────────────────────────────────
+    def _challenger_block(result: dict, cid: str) -> dict:
+        best = result.get("best_candidate", {}) if cid == "C3_decision_tuning" else {}
+        return {
+            "upgrade_candidate": result.get("upgrade_candidate", "unknown"),
+            "upgrade_reason":    result.get("upgrade_reason",
+                                   (best or {}).get("upgrade_reason", "")),
+            "output_dir":        result.get("output_dir", ""),
+        }
+
+    summary = {
+        "generated_at":           datetime.now().isoformat(),
+        "active_baseline":        bl_label,
+        "baseline_auc":           baseline_metrics.get("auc", 0),
+        "baseline_f1_reject":     baseline_metrics.get("f1_reject", 0),
+        "c2_feature_pruning":     _challenger_block(c2_result, "C2_feature_pruning"),
+        "c3_decision_tuning":     _challenger_block(c3_result, "C3_decision_tuning"),
+        "best_challenger":        best_challenger,
+        "overall_recommendation": overall,
+    }
+
+    # ── Write artifacts ───────────────────────────────────────────────
+    experiments_dir = project_root / "model_bank" / "experiments"
+    experiments_dir.mkdir(parents=True, exist_ok=True)
+    json_path = experiments_dir / "challenger_evaluation_summary.json"
+    md_path   = experiments_dir / "challenger_evaluation_summary.md"
+
+    json_path.write_text(
+        json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+    _write_evaluation_summary_md(summary, md_path)
+
+    print(f"\n  Summary JSON : {json_path}")
+    print(f"  Summary MD   : {md_path}")
+    print(f"\n  Overall      : {overall}")
+    print("\n" + "=" * 70)
+    print("  Challenger Evaluation complete.")
+    print("=" * 70)
+
+    return {**summary, "summary_path": str(json_path)}
+
+
+def _write_evaluation_summary_md(summary: dict, path: Path):
+    """Write challenger_evaluation_summary.md."""
+
+    def _status_icon(st: str) -> str:
+        return {"full_upgrade": "FULL UPGRADE",
+                "routing_only_upgrade": "ROUTING UPGRADE",
+                "reject": "REJECT"}.get(st, st.upper())
+
+    c2 = summary.get("c2_feature_pruning", {})
+    c3 = summary.get("c3_decision_tuning", {})
+
+    lines = [
+        "# Challenger Evaluation Summary",
+        "",
+        f"> Generated: {summary.get('generated_at', '')[:19]}  ",
+        f"> Active baseline: **{summary.get('active_baseline', '')}**  ",
+        f"> Baseline AUC: {summary.get('baseline_auc', 0):.4f}  |  "
+        f"Baseline F1_reject: {summary.get('baseline_f1_reject', 0):.4f}",
+        "",
+        "---",
+        "",
+        "## Challenger Results",
+        "",
+        "| Challenger | Decision | Reason |",
+        "|---|---|---|",
+        f"| C2 Feature Pruning | **{_status_icon(c2.get('upgrade_candidate', ''))}** "
+        f"| {c2.get('upgrade_reason', '')} |",
+        f"| C3 Decision Tuning | **{_status_icon(c3.get('upgrade_candidate', ''))}** "
+        f"| {c3.get('upgrade_reason', '')} |",
+        "",
+        "---",
+        "",
+        "## Overall Recommendation",
+        "",
+        f"> **{summary.get('overall_recommendation', '')}**",
+        "",
+        "---",
+        "",
+        "## Output Locations",
+        "",
+        f"- C2: `{c2.get('output_dir', '')}`",
+        f"- C3: `{c3.get('output_dir', '')}`",
+        "",
+        "---",
+        "",
+        "*Auto-generated by run_challenger_evaluation_pipeline(). "
+        "No baseline has been replaced — promotion requires an explicit --create-baseline call.*",
+    ]
+    path.write_text("\n".join(lines), encoding="utf-8")
 
 
 # ============================================
@@ -429,15 +706,23 @@ def run_full_pipeline(
     imbalance_strategy: str = "scale_weight",
     use_calibration: bool = True,
     model_names: list = None,
+    include_challengers: bool = True,
     include_monitoring: bool = False,
 ):
     """
-    Run the full pipeline: data processing + four-phase training + (optional) production monitoring.
+    Run the full pipeline.
+
+    Stage A  Data processing (Bronze -> Silver -> Gold)
+    Stage B  Four-phase training + auto-create/activate baseline
+    Stage C  Challenger evaluation: C2 + C3 vs active baseline  [include_challengers=True]
+    Stage D  Decision summary artifact written to model_bank/experiments/
+    Stage E  Production monitoring                               [include_monitoring=True]
 
     Args:
-        lower_threshold: Fallback threshold. Phase 3 recommended value takes priority.
-        upper_threshold: Fallback threshold. Phase 3 recommended value takes priority.
-        include_monitoring: If True, run monitoring after training.
+        lower_threshold:      Fallback threshold; Phase 3 recommended value takes priority.
+        upper_threshold:      Fallback threshold; Phase 3 recommended value takes priority.
+        include_challengers:  Run C2 + C3 challenger evaluation stage (default True).
+        include_monitoring:   Run production monitoring after challengers (default False).
     """
     if project_root is None:
         project_root = PROJECT_ROOT
@@ -445,14 +730,16 @@ def run_full_pipeline(
     print("\n" + "=" * 80)
     print("  ML PIPELINE - Full Run")
     print("  Four Phase Training Architecture")
+    stages = ["Data", "Training", "Challenger Evaluation"]
     if include_monitoring:
-        print("  (includes Production Monitoring)")
+        stages.append("Monitoring")
+    print(f"  Stages: {' -> '.join(stages)}")
     print("=" * 80)
 
-    # Step 1: Data processing
+    # Stage A: Data processing
     run_data_pipeline(project_root)
 
-    # Step 2: Four-phase training
+    # Stage B: Four-phase training + baseline
     results = run_training_pipeline(
         project_root=project_root,
         lower_threshold=lower_threshold,
@@ -462,8 +749,12 @@ def run_full_pipeline(
         model_names=model_names,
     )
 
-    # Step 3: Production monitoring (optional)
-    # Use Phase 3 selected thresholds from training results when available.
+    # Stage C + D: Challenger evaluation
+    challenger_summary = {}
+    if include_challengers:
+        challenger_summary = run_challenger_evaluation_pipeline(project_root=project_root)
+
+    # Stage E: Production monitoring (optional)
     monitoring_result = None
     if include_monitoring:
         selected_lower = None
@@ -480,11 +771,14 @@ def run_full_pipeline(
 
     print("\n" + "=" * 80)
     print("  Full pipeline complete.")
-    if include_monitoring:
-        print("  Steps completed: Data Pipeline -> Training -> Monitoring")
+    print(f"  Stages completed: {' -> '.join(stages)}")
     print("=" * 80)
 
-    return {"training": results, "monitoring": monitoring_result}
+    return {
+        "training": results,
+        "challengers": challenger_summary,
+        "monitoring": monitoring_result,
+    }
 
 
 # ============================================
@@ -497,14 +791,17 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python main.py                              # Run Data + Training (default)
-  python main.py --all                        # Data + Training + Monitoring
+  python main.py                              # Data + Training + Challenger Evaluation (default)
+  python main.py --all                        # Data + Training + Challengers + Monitoring
   python main.py --data-only                  # Data processing only
   python main.py --train-only                 # Training only (requires Gold data)
+  python main.py --challengers-only           # Challenger evaluation only (requires baseline)
   python main.py --monitor-only               # Production monitoring only
-  python main.py --run-c2                     # Run C2 Feature Pruning challenger
-  python main.py --run-c3                     # Run C3 Decision Tuning challenger
-  python main.py --compare-baseline --challenger c2   # Generate comparison report
+  python main.py --run-c2                     # Run C2 Feature Pruning challenger (manual)
+  python main.py --run-c3                     # Run C3 Decision Tuning challenger (manual)
+  python main.py --compare-baseline --challenger c2   # Regenerate C2 comparison report
+  python main.py --compare-baseline --challenger c3   # Regenerate C3 comparison report
+  python main.py --create-baseline            # Create and activate baseline from latest run
   python main.py --lower-threshold 0.35       # Custom threshold
   python main.py --imbalance smote            # Use SMOTE resampling
         """
@@ -523,6 +820,11 @@ Examples:
         help="Run four-phase training only (requires Gold data)",
     )
     mode_group.add_argument(
+        "--challengers-only",
+        action="store_true",
+        help="Run challenger evaluation only: C2 + C3 vs active baseline (requires baseline)",
+    )
+    mode_group.add_argument(
         "--monitor-only",
         action="store_true",
         help="Run production monitoring only (requires trained model)",
@@ -530,22 +832,22 @@ Examples:
     mode_group.add_argument(
         "--all",
         action="store_true",
-        help="Run full pipeline: Data + Training + Monitoring",
+        help="Run full pipeline: Data + Training + Challenger Evaluation + Monitoring",
     )
     mode_group.add_argument(
         "--run-c2",
         action="store_true",
-        help="Run C2 Feature Pruning challenger (outputs to model_bank/experiments/c2_feature_pruning/)",
+        help="Run C2 Feature Pruning challenger manually",
     )
     mode_group.add_argument(
         "--run-c3",
         action="store_true",
-        help="Run C3 Decision Tuning challenger (outputs to model_bank/experiments/c3_decision_tuning/)",
+        help="Run C3 Decision Tuning challenger manually",
     )
     mode_group.add_argument(
         "--compare-baseline",
         action="store_true",
-        help="Generate baseline comparison report for a challenger (requires --challenger)",
+        help="Regenerate baseline comparison report for a challenger (requires --challenger)",
     )
     mode_group.add_argument(
         "--create-baseline",
@@ -622,6 +924,9 @@ Examples:
             model_names=args.models,
         )
 
+    elif args.challengers_only:
+        run_challenger_evaluation_pipeline(project_root=PROJECT_ROOT)
+
     elif args.monitor_only:
         run_monitoring_pipeline(
             lower_threshold=args.lower_threshold,
@@ -635,6 +940,7 @@ Examples:
             imbalance_strategy=args.imbalance,
             use_calibration=not args.no_calibration,
             model_names=args.models,
+            include_challengers=True,
             include_monitoring=True,
         )
 
@@ -660,26 +966,94 @@ Examples:
     elif args.compare_baseline:
         if not args.challenger:
             parser.error("--compare-baseline requires --challenger {c2,c3}")
-        from utils.challenger_manager import load_active_baseline_metrics
-        challenger_id = args.challenger
-        exp_dir = PROJECT_ROOT / "model_bank" / "experiments" / (
-            "c2_feature_pruning" if challenger_id == "c2" else "c3_decision_tuning"
-        )
         import json
-        summary_path = exp_dir / "challenger_summary.json"
-        if not summary_path.exists():
-            print(f"ERROR: challenger_summary.json not found at {exp_dir}")
-            print("       Run --run-c2 or --run-c3 first.")
-            return
-        challenger_metrics = json.loads(summary_path.read_text(encoding="utf-8"))
+        from utils.challenger_manager import load_active_baseline_metrics
+
+        challenger_id = args.challenger.lower()
         active_baseline = load_active_baseline_metrics(PROJECT_ROOT)
-        report_path = compare_against_baseline(
-            challenger_id=challenger_id,
-            challenger_metrics=challenger_metrics,
-            baseline_metrics=active_baseline,
-            output_dir=exp_dir,
+        bl_label = (
+            active_baseline.get("_source", "")
+            .replace("active_baseline:", "")
+            .strip()
+            or "Active Baseline"
         )
-        print(f"\nComparison report saved: {report_path}")
+
+        if challenger_id == "c2":
+            exp_dir = PROJECT_ROOT / "model_bank" / "experiments" / "c2_feature_pruning"
+            meta_path = exp_dir / "c2_challenger_metadata.json"
+            if not meta_path.exists():
+                print(f"ERROR: c2_challenger_metadata.json not found at {exp_dir}")
+                print("       Run --run-c2 first.")
+                return
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            compare_against_baseline(
+                challenger_id="C2_feature_pruning",
+                challenger_desc="Remove 6 unstable/low-importance features (25 -> 19)",
+                challenger_holdout=meta.get("holdout_metrics", {}),
+                challenger_zone=meta.get("zone_metrics", {}),
+                challenger_stability=meta.get("stability_metrics", {}),
+                challenger_features_dropped=meta.get("features_dropped", []),
+                challenger_features_remaining=meta.get("feature_count", 0),
+                baseline_metrics=active_baseline,
+                output_dir=exp_dir,
+                upgrade_status=meta.get("upgrade_candidate"),
+                upgrade_reason=meta.get("upgrade_reason"),
+                suitable_routing=meta.get("suitable_for_routing_improvement"),
+                suitable_replace=meta.get("suitable_for_replacing_baseline_classifier"),
+                baseline_label=bl_label,
+            )
+            print(f"\nC2 comparison report regenerated against {bl_label}.")
+
+        elif challenger_id == "c3":
+            exp_dir = PROJECT_ROOT / "model_bank" / "experiments" / "c3_decision_tuning"
+            summary_path = exp_dir / "challenger_summary.json"
+            if not summary_path.exists():
+                print(f"ERROR: challenger_summary.json not found at {exp_dir}")
+                print("       Run --run-c3 first.")
+                return
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            best = summary.get("best_candidate", {})
+            holdout = best.get("holdout_metrics", {})
+            zone_p  = best.get("zone_precision", {})
+            zone_r  = best.get("zone_ratio", {})
+            workload = best.get("human_workload", {})
+            stab    = best.get("stability", {})
+            compare_against_baseline(
+                challenger_id="C3_decision_tuning",
+                challenger_desc="Decision-oriented + anti-overfitting tuning on C2 feature set",
+                challenger_holdout={
+                    "auc":        holdout.get("auc", 0),
+                    "f1_reject":  holdout.get("f1_reject", 0),
+                    "brier_score": holdout.get("brier", 0),
+                    "ks":          holdout.get("ks", 0),
+                },
+                challenger_zone={
+                    "low_zone_reject_precision":  zone_p.get("low_zone_reject_precision", 0),
+                    "high_zone_approve_precision": zone_p.get("high_zone_approve_precision", 0),
+                    "high_zone_ratio":             zone_r.get("high_zone_ratio", 0),
+                    "manual_zone_ratio":           zone_r.get("manual_zone_ratio", 0),
+                    "low_zone_ratio":              zone_r.get("low_zone_ratio", 0),
+                    "human_review_workload_ratio": workload.get("human_review_workload_ratio", 0),
+                },
+                challenger_stability={
+                    "avg_monitor_auc":       stab.get("avg_monitor_auc", 0),
+                    "avg_monitor_f1_reject": stab.get("avg_monitor_f1_reject", 0),
+                    "stability_score":       stab.get("stability_score", 0),
+                },
+                challenger_features_dropped=summary.get("features_dropped", []),
+                challenger_features_remaining=summary.get("feature_count", 0),
+                baseline_metrics=active_baseline,
+                output_dir=exp_dir,
+                upgrade_status=best.get("upgrade_candidate"),
+                upgrade_reason=best.get("upgrade_reason"),
+                suitable_routing=best.get("suitable_for_routing_improvement"),
+                suitable_replace=best.get("suitable_for_replacing_baseline_classifier"),
+                baseline_label=bl_label,
+            )
+            print(f"\nC3 comparison report regenerated against {bl_label}.")
+
+        else:
+            print(f"ERROR: Unknown challenger '{args.challenger}'. Use 'c2' or 'c3'.")
 
     elif args.create_baseline:
         name = _create_named_baseline(PROJECT_ROOT, baseline_name=args.baseline_name)
@@ -688,13 +1062,14 @@ Examples:
             print("Future challengers will compare against this baseline.")
 
     else:
-        # Default: Data + Training (no monitoring)
+        # Default: Data + Training + Challenger Evaluation (no monitoring)
         run_full_pipeline(
             lower_threshold=args.lower_threshold,
             upper_threshold=args.upper_threshold,
             imbalance_strategy=args.imbalance,
             use_calibration=not args.no_calibration,
             model_names=args.models,
+            include_challengers=True,
             include_monitoring=False,
         )
 

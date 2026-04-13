@@ -426,6 +426,10 @@ class BaselineManager:
                 "manual_review_load": round(zone_policy.get("manual_review_load", 0), 4),
                 "high_zone_precision": round(zone_policy.get("high_zone_precision", 0), 4),
                 "low_zone_precision": round(zone_policy.get("low_zone_precision", 0), 4),
+                # Explicit per-zone population ratios (sourced from zone_policy_summary.json)
+                "high_zone_ratio": round(zone_policy.get("high_zone_ratio", 0), 4),
+                "review_zone_ratio": round(zone_policy.get("review_zone_ratio", 0), 4),
+                "low_zone_ratio": round(zone_policy.get("low_zone_ratio", 0), 4),
                 "constraint_status": "all_passed" if zone_policy.get("passes_hard_constraints") else "failed",
             },
 
