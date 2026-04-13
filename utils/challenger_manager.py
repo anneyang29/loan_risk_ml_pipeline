@@ -1,14 +1,29 @@
 """
 Challenger Manager
 ==================
-統一管理所有 challenger 的核心邏輯。
-由 main.py 呼叫，不依賴 experiments/ 目錄下的 script。
+Manages all challenger experiment logic.
+Called from main.py; does not depend on experiments/ scripts.
 
-包含：
-- run_c2_feature_pruning_challenger()   C2: 移除 6 個不穩定特徵 (25 -> 19 features)
-- run_c3_decision_tuning_challenger()   C3: Decision-oriented + anti-overfitting tuning
-- compare_against_baseline()            與 baseline v1 做指標對比
-- generate_routing_report()             輸出可讀的分流分析報告
+Promotion decision labels (routing-first):
+  full_upgrade          - challenger is better on both routing AND classifier metrics
+  routing_only_upgrade  - routing improved, classifier slightly worse; safe to promote routing policy
+  reject                - challenger failed guardrails or showed no improvement
+
+Business priority:
+  Primary  : low_zone_reject_precision, human_review_workload_ratio, routing layout
+  Guardrails: AUC >= baseline - 0.01, F1_reject >= baseline - 0.02, high_zone precision >= 0.98
+  Overfitting check: train-monitor AUC gap, calibration gap
+
+Baseline loading:
+  Active baseline is read from model_bank/baselines/active_baseline.json at runtime.
+  BASELINE_V1_METRICS is kept as a static fallback when no active baseline exists.
+
+Contains:
+  load_active_baseline_metrics()         Load metrics from active_baseline.json
+  run_c2_feature_pruning_challenger()    C2: drop 6 unstable features (25 -> 19)
+  run_c3_decision_tuning_challenger()    C3: decision-oriented + anti-overfitting tuning
+  compare_against_baseline()             Generate plain-text comparison report
+  generate_routing_report()              Generate routing-focused summary report
 
 Usage (from main.py):
     python main.py --run-c2
@@ -61,7 +76,94 @@ warnings.filterwarnings("ignore", category=UserWarning)
 
 
 # ============================================================
-# Reference Metrics
+# Active Baseline Loader
+# ============================================================
+
+def load_active_baseline_metrics(project_root: Optional[Path] = None) -> Dict:
+    """
+    Load metrics from the active baseline at runtime.
+
+    Resolution order:
+      1. model_bank/baselines/active_baseline.json  (written by BaselineManager)
+      2. model_bank/baselines/baseline_v1/baseline_metadata.json  (fallback by name)
+      3. BASELINE_V1_METRICS hardcoded dict          (last resort)
+
+    The returned dict always contains at minimum:
+      auc, f1_reject, brier_score, ks, low_zone_reject_precision,
+      manual_review_ratio, high_zone_ratio, low_zone_ratio
+    """
+    if project_root is None:
+        project_root = PROJECT_ROOT
+
+    baselines_path = project_root / "model_bank" / "baselines"
+    active_file = baselines_path / "active_baseline.json"
+
+    # Try active_baseline.json -> points to name, load its metadata
+    if active_file.exists():
+        try:
+            active = json.loads(active_file.read_text(encoding="utf-8"))
+            baseline_name = active.get("active_baseline", "")
+            meta_path = baselines_path / baseline_name / "baseline_metadata.json"
+            if meta_path.exists():
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                h = meta.get("holdout_metrics", {})
+                bc = meta.get("business_constraints", {})
+                t = meta.get("threshold_policy", {})
+                metrics = {
+                    "auc":                      h.get("auc", 0.0),
+                    "f1_reject":                h.get("f1_reject", 0.0),
+                    "brier_score":              h.get("brier_score", 0.0),
+                    "ks":                       h.get("ks", 0.0),
+                    "precision_reject":         h.get("precision_reject", 0.0),
+                    "recall_reject":            h.get("recall_reject", 0.0),
+                    # zone precision
+                    "low_zone_reject_precision": bc.get("low_zone_precision",
+                                                  h.get("low_zone_reject_precision", 0.0)),
+                    "high_zone_approve_precision": bc.get("high_zone_precision",
+                                                    h.get("high_zone_approve_precision", 0.0)),
+                    # zone ratio
+                    "manual_review_ratio":      bc.get("manual_review_load", 0.0),
+                    "high_zone_ratio":          bc.get("auto_decision_rate", 0.0),  # approx
+                    "low_zone_ratio":           bc.get("low_zone_ratio", 0.0),
+                    # stability
+                    "rolling_stability_score":  meta.get("rolling_cv_metrics", {}).get("stability_score", 0.0),
+                    "avg_monitor_f1_reject":    meta.get("rolling_cv_metrics", {}).get("avg_monitor_f1_reject", 0.0),
+                    # thresholds
+                    "lower_threshold":          t.get("lower_threshold", 0.5),
+                    "upper_threshold":          t.get("upper_threshold", 0.85),
+                    "_source": f"active_baseline:{baseline_name}",
+                }
+                logger.info("Loaded active baseline metrics from: %s", baseline_name)
+                return metrics
+        except Exception as exc:
+            logger.warning("Could not read active_baseline.json: %s", exc)
+
+    # Fallback: look for baseline_v1 directly
+    v1_meta = baselines_path / "baseline_v1" / "baseline_metadata.json"
+    if v1_meta.exists():
+        try:
+            meta = json.loads(v1_meta.read_text(encoding="utf-8"))
+            h = meta.get("holdout_metrics", {})
+            bc = meta.get("business_constraints", {})
+            metrics = {**BASELINE_V1_METRICS}
+            metrics.update({
+                "auc":               h.get("auc", metrics["auc"]),
+                "f1_reject":         h.get("f1_reject", metrics["f1_reject"]),
+                "brier_score":       h.get("brier_score", metrics["brier_score"]),
+                "ks":                h.get("ks", metrics["ks"]),
+                "_source": "baseline_v1_metadata",
+            })
+            logger.info("Loaded baseline metrics from: baseline_v1/baseline_metadata.json")
+            return metrics
+        except Exception as exc:
+            logger.warning("Could not read baseline_v1 metadata: %s", exc)
+
+    logger.warning("No active baseline found; using hardcoded BASELINE_V1_METRICS as fallback.")
+    return dict(BASELINE_V1_METRICS)
+
+
+# ============================================================
+# Reference Metrics  (static fallback — do not use directly in challenger logic)
 # ============================================================
 
 BASELINE_V1_METRICS: Dict = {
@@ -347,52 +449,113 @@ def compute_rolling_stability(rolling_results_path: Path) -> Dict:
 
 
 # ============================================================
-# Upgrade Candidate Evaluation
+# Upgrade Candidate Evaluation  (routing-first)
 # ============================================================
 
 def evaluate_upgrade_candidate(
     challenger: Dict,
     baseline: Dict,
-    scoring_cfg: DecisionScoringConfig,
+    scoring_cfg: "DecisionScoringConfig",
 ) -> Tuple[str, str, bool, bool]:
     """
-    Determine upgrade_candidate status.
+    Determine promotion decision using routing-first logic.
+
+    Business priority:
+      PRIMARY   : routing quality (lzp, human workload, zone layout)
+      GUARDRAILS: classifier metrics must not regress beyond tolerance
+
+    Promotion labels:
+      full_upgrade         - routing improved AND classifier not regressed
+      routing_only_upgrade - routing improved, but classifier slightly regressed
+                             (acceptable; routing improvement is the primary goal)
+      reject               - routing did not improve, or hard guardrails failed
+
+    Args:
+        challenger : dict with holdout + zone metrics for the challenger
+        baseline   : dict with reference metrics (from load_active_baseline_metrics)
+        scoring_cfg: DecisionScoringConfig instance
 
     Returns:
-        (status, reason, suitable_for_routing, suitable_for_replacing_classifier)
-        status: "yes" | "conditional" | "no"
+        (promotion_decision, reason, suitable_for_routing, suitable_for_replacing_classifier)
     """
-    bl_workload = (
-        baseline.get("manual_review_ratio", 0.0)
-        + baseline.get("low_zone_ratio", 0.0)
-    )
-    lzp_improved   = challenger.get("low_zone_reject_precision", 0) > baseline.get("low_zone_reject_precision", 0) + 0.005
-    hz_ok          = challenger.get("high_zone_approve_precision", 0) >= scoring_cfg.min_high_zone_approve_precision
-    workload_ok    = challenger.get("human_review_workload_ratio", 1) <= bl_workload + 0.02
-    f1r_ok         = challenger.get("holdout_f1_reject", 0) >= baseline.get("f1_reject", 0) - 0.005
-    no_overfit     = challenger.get("overfitting_penalty", 1) < 0.01
+    # ── Routing improvement checks ────────────────────────────────────
+    bl_lzp      = baseline.get("low_zone_reject_precision", 0.0)
+    ch_lzp      = challenger.get("low_zone_reject_precision", 0.0)
+    lzp_improved = ch_lzp > bl_lzp + 0.005
 
-    if lzp_improved and hz_ok and workload_ok and f1r_ok and no_overfit:
+    bl_workload  = baseline.get("manual_review_ratio", 0.0) + baseline.get("low_zone_ratio", 0.0)
+    ch_workload  = challenger.get("human_review_workload_ratio",
+                                  challenger.get("manual_review_ratio", 0.0)
+                                  + challenger.get("low_zone_ratio", 0.0))
+    workload_ok  = ch_workload <= bl_workload + 0.02   # allow 2 pp tolerance
+
+    ch_hz_prec   = challenger.get("high_zone_approve_precision", 0.0)
+    hz_guardrail = ch_hz_prec >= scoring_cfg.min_high_zone_approve_precision
+
+    # ── Classifier guardrails (tolerances, not hard stops) ───────────
+    bl_auc       = baseline.get("auc", 0.0)
+    ch_auc       = challenger.get("holdout_auc", challenger.get("auc", 0.0))
+    auc_ok       = ch_auc >= bl_auc - 0.01           # allow 1 pp regression
+
+    bl_f1r       = baseline.get("f1_reject", 0.0)
+    ch_f1r       = challenger.get("holdout_f1_reject", challenger.get("f1_reject", 0.0))
+    f1r_ok       = ch_f1r >= bl_f1r - 0.02           # allow 2 pp regression
+
+    # ── Overfitting guardrail ─────────────────────────────────────────
+    overfit_ok   = challenger.get("overfitting_penalty", 1.0) < scoring_cfg.max_train_monitor_auc_gap
+
+    # ── Routing improvement = primary success criterion ───────────────
+    routing_improved = lzp_improved and workload_ok and hz_guardrail
+
+    if not hz_guardrail:
         return (
-            "yes",
-            "low_zone_reject_precision improved, F1_reject not regressed, "
-            "high zone precision meets threshold, human workload not worsened, "
-            "overfitting controlled. Candidate qualifies for full upgrade.",
+            "reject",
+            f"High zone approve precision = {ch_hz_prec:.4f} < required {scoring_cfg.min_high_zone_approve_precision}. "
+            "Cannot promote: auto-approve quality guardrail failed.",
+            False, False,
+        )
+
+    if not routing_improved:
+        return (
+            "reject",
+            "Routing quality did not improve meaningfully. "
+            f"low_zone_reject_precision: {bl_lzp:.4f} -> {ch_lzp:.4f} (improvement < 0.005). "
+            f"human_review_workload: {bl_workload:.3f} -> {ch_workload:.3f}. "
+            "No promotion recommended.",
+            False, False,
+        )
+
+    # Routing improved — now check classifier guardrails
+    classifier_ok = auc_ok and f1r_ok
+
+    if routing_improved and classifier_ok and overfit_ok:
+        return (
+            "full_upgrade",
+            f"Routing improved: low_zone_reject_precision {bl_lzp:.4f} -> {ch_lzp:.4f} (+{ch_lzp-bl_lzp:.4f}), "
+            f"human_workload {bl_workload:.3f} -> {ch_workload:.3f}. "
+            f"Classifier guardrails satisfied: AUC {bl_auc:.4f} -> {ch_auc:.4f}, "
+            f"F1_reject {bl_f1r:.4f} -> {ch_f1r:.4f}. "
+            "Qualifies for full baseline replacement.",
             True, True,
         )
-    if lzp_improved and hz_ok and workload_ok:
-        return (
-            "conditional",
-            "low_zone_reject_precision improved and routing metrics acceptable, "
-            "but F1_reject regressed vs baseline. "
-            "Suitable for routing improvement but not for full baseline replacement.",
-            True, False,
-        )
+
+    # Routing improved but classifier slightly regressed — routing_only_upgrade
+    regression_desc = []
+    if not auc_ok:
+        regression_desc.append(f"AUC {bl_auc:.4f} -> {ch_auc:.4f} (>{0.01:.2f} regression)")
+    if not f1r_ok:
+        regression_desc.append(f"F1_reject {bl_f1r:.4f} -> {ch_f1r:.4f} (>{0.02:.2f} regression)")
+    if not overfit_ok:
+        regression_desc.append("overfitting_penalty elevated")
+
     return (
-        "no",
-        "Challenger did not meet core upgrade conditions "
-        "(low_zone_reject_precision improvement + high zone precision + workload).",
-        False, False,
+        "routing_only_upgrade",
+        f"Routing improved: low_zone_reject_precision {bl_lzp:.4f} -> {ch_lzp:.4f} (+{ch_lzp-bl_lzp:.4f}), "
+        f"human_workload {bl_workload:.3f} -> {ch_workload:.3f}. "
+        f"Classifier regressions noted: {'; '.join(regression_desc)}. "
+        "Routing policy may be promoted independently. "
+        "Full baseline replacement not recommended until classifier is improved.",
+        True, False,
     )
 
 
@@ -545,9 +708,9 @@ def compare_against_baseline(
     lines.append("")
     if upgrade_status:
         status_label = {
-            "yes":         "YES - Qualifies for full upgrade",
-            "conditional": "CONDITIONAL - Routing improvement only; not recommended as full replacement",
-            "no":          "NO - Does not meet upgrade criteria",
+            "full_upgrade":         "FULL_UPGRADE - Qualifies for full baseline replacement",
+            "routing_only_upgrade": "ROUTING_ONLY_UPGRADE - Routing policy may be promoted; classifier replacement not recommended",
+            "reject":               "REJECT - Does not meet upgrade criteria",
         }.get(upgrade_status, upgrade_status)
         lines.append(f"upgrade_candidate: {status_label}")
         lines.append("")
@@ -555,7 +718,8 @@ def compare_against_baseline(
         lines.append("")
         lines.append("| Dimension | Recommendation |")
         lines.append("|-----------|----------------|")
-        lines.append(f"| Auto-approve support | {'YES' if ch_hz is not None and ch_hz >= 0.98 else 'REVIEW NEEDED'} |")
+        ch_hz_val = challenger_zone.get("high_zone_approve_precision", 0.0)
+        lines.append(f"| Auto-approve support | {'YES' if ch_hz_val >= 0.98 else 'REVIEW NEEDED'} |")
 
         lzp_val = challenger_zone.get("low_zone_reject_precision", 0.0)
         lines.append(f"| Low zone enhanced review pool | {'YES' if lzp_val >= 0.55 else 'MARGINAL'} |")
@@ -606,18 +770,18 @@ def compare_against_baseline(
     lines += (regressed if regressed else ["  None"])
     lines.append("")
 
-    if upgrade_status == "yes":
-        lines.append("RECOMMENDATION: Proceed with upgrade. Challenger outperforms baseline across key routing and classifier metrics.")
-    elif upgrade_status == "conditional":
+    if upgrade_status == "full_upgrade":
+        lines.append("RECOMMENDATION: Proceed with full upgrade. Challenger outperforms baseline across key routing and classifier metrics.")
+    elif upgrade_status == "routing_only_upgrade":
         lines.append("RECOMMENDATION: Deploy for routing improvement only.")
         lines.append("  - Routing improvement = YES: low zone is cleaner, human workload acceptable.")
-        lines.append("  - Classifier replacement = NO: F1_reject regressed; full baseline replacement carries risk.")
+        lines.append("  - Classifier replacement = NO: classifier guardrails not fully satisfied; full baseline replacement carries risk.")
         lines.append("")
         lines.append("Next steps:")
         lines.append("  1. Run C1 Reject-Targeted Feature Challenger to improve both routing AND classifier metrics.")
         lines.append("  2. In the interim, challenger can be deployed as routing-only alongside existing baseline.")
     else:
-        lines.append("RECOMMENDATION: Do not upgrade. Challenger did not demonstrate sufficient improvement.")
+        lines.append("RECOMMENDATION: Do not upgrade. Challenger did not demonstrate sufficient routing improvement.")
         lines.append("  Consider C1 reject-targeted feature engineering as the next step.")
 
     lines.append("")
@@ -777,8 +941,9 @@ def run_c2_feature_pruning_challenger(
     # Upgrade evaluation
     combined = {**c2_holdout, **c2_zone}
     scoring_cfg = DecisionScoringConfig()
+    baseline_metrics = load_active_baseline_metrics(project_root)
     uc_status, uc_reason, suitable_r, suitable_c = evaluate_upgrade_candidate(
-        combined, BASELINE_V1_METRICS, scoring_cfg
+        combined, baseline_metrics, scoring_cfg
     )
 
     # Reports
@@ -793,7 +958,7 @@ def run_c2_feature_pruning_challenger(
         challenger_stability=c2_stability,
         challenger_features_dropped=features_to_drop,
         challenger_features_remaining=len(feature_names),
-        baseline_metrics=BASELINE_V1_METRICS,
+        baseline_metrics=baseline_metrics,
         output_dir=challenger_output,
         upgrade_status=uc_status,
         upgrade_reason=uc_reason,
@@ -804,7 +969,7 @@ def run_c2_feature_pruning_challenger(
     routing_report = generate_routing_report(
         challenger_id="C2_feature_pruning",
         best_candidate={**c2_holdout, **c2_zone, "upgrade_candidate": uc_status},
-        baseline_metrics=BASELINE_V1_METRICS,
+        baseline_metrics=baseline_metrics,
         output_dir=challenger_output,
     )
 
@@ -889,6 +1054,7 @@ def _evaluate_c3_candidate(
     feature_cols: List[str],
     scoring_cfg: DecisionScoringConfig,
     bc_cfg: BusinessConstraintConfig,
+    baseline_metrics: Optional[Dict] = None,
 ) -> Optional[Dict]:
     """Evaluate a single C3 candidate configuration."""
     config_id = candidate_cfg["config_id"]
@@ -1032,8 +1198,9 @@ def _evaluate_c3_candidate(
         "overfitting_penalty": overfitting_penalty,
         **zone_m,
     }
+    _bl = baseline_metrics if baseline_metrics is not None else BASELINE_V1_METRICS
     uc_status, uc_reason, suitable_r, suitable_c = evaluate_upgrade_candidate(
-        combined, BASELINE_V1_METRICS, sc
+        combined, _bl, sc
     )
 
     return {
@@ -1131,6 +1298,7 @@ def run_c3_decision_tuning_challenger(
     config_path = project_root / "config" / "pipeline_config.yaml"
     config = ConfigManager(config_path) if config_path.exists() else None
     scoring_cfg = DecisionScoringConfig()
+    baseline_metrics = load_active_baseline_metrics(project_root)
     bc_cfg = BusinessConstraintConfig(
         max_manual_review_ratio=0.12,
         min_auto_decision_rate=0.85,
@@ -1184,6 +1352,7 @@ def run_c3_decision_tuning_challenger(
                     cand, cal, trainer,
                     X_dev, y_dev, X_policy, y_policy, X_holdout, y_holdout,
                     scale_pos_weight, class_weight, feature_cols, scoring_cfg, bc_cfg,
+                    baseline_metrics=baseline_metrics,
                 )
                 if rec is not None:
                     all_records.append(rec)
@@ -1239,7 +1408,7 @@ def run_c3_decision_tuning_challenger(
     # Summary JSON + reports using best candidate
     best = passing[0] if passing else sorted_records[0]
 
-    bl_workload = BASELINE_V1_METRICS["manual_review_ratio"] + BASELINE_V1_METRICS["low_zone_ratio"]
+    bl_workload = baseline_metrics["manual_review_ratio"] + baseline_metrics["low_zone_ratio"]
 
     summary = {
         "challenger_id": "C3_decision_tuning",
@@ -1300,8 +1469,8 @@ def run_c3_decision_tuning_challenger(
                 ),
                 "full_baseline_replacement": (
                     "YES: challenger outperforms baseline on all key metrics"
-                    if best["upgrade_candidate"] == "yes"
-                    else "NOT RECOMMENDED: F1_reject regressed; routing improvement only"
+                    if best["upgrade_candidate"] == "full_upgrade"
+                    else "NOT RECOMMENDED: routing_only_upgrade or reject — full replacement not warranted"
                 ),
             },
         },
@@ -1336,7 +1505,7 @@ def run_c3_decision_tuning_challenger(
         },
         challenger_features_dropped=features_to_drop,
         challenger_features_remaining=len(feature_cols),
-        baseline_metrics=BASELINE_V1_METRICS,
+        baseline_metrics=baseline_metrics,
         output_dir=output_dir,
         upgrade_status=best["upgrade_candidate"],
         upgrade_reason=best["upgrade_reason"],
@@ -1347,7 +1516,7 @@ def run_c3_decision_tuning_challenger(
     generate_routing_report(
         challenger_id="C3_decision_tuning",
         best_candidate=best,
-        baseline_metrics=BASELINE_V1_METRICS,
+        baseline_metrics=baseline_metrics,
         output_dir=output_dir,
     )
 

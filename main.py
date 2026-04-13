@@ -13,6 +13,11 @@ Challenger experiments:
 - C2 Feature Pruning: remove 6 unstable / low-importance features (25 -> 19)
 - C3 Decision Tuning: decision-oriented + anti-overfitting hyperparameter search
 
+Baseline lifecycle:
+- After the first successful training run, baseline_v1 is auto-created and activated.
+- Use --create-baseline to manually create a named baseline from the latest run.
+- Challengers compare against the active baseline (dynamic loading, not hardcoded).
+
 Usage:
     python main.py                             # Data + Training (default)
     python main.py --all                       # Data + Training + Monitoring
@@ -23,6 +28,8 @@ Usage:
     python main.py --run-c3                    # C3 Decision Tuning challenger
     python main.py --compare-baseline --challenger c2   # Comparison report only
     python main.py --compare-baseline --challenger c3   # Comparison report only
+    python main.py --create-baseline                    # Create baseline from latest run
+    python main.py --create-baseline --baseline-name v2 # Name the new baseline
     python main.py --lower-threshold 0.3       # Custom threshold (fallback)
     python main.py --imbalance scale_weight    # Imbalance handling method
 """
@@ -55,7 +62,6 @@ from utils.challenger_manager import (
     run_c3_decision_tuning_challenger,
     compare_against_baseline,
     generate_routing_report,
-    BASELINE_V1_METRICS,
     C2_METRICS,
 )
 
@@ -65,6 +71,85 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+
+# ============================================
+# Baseline Helpers
+# ============================================
+
+def _maybe_create_first_baseline(project_root: Path, training_results: dict):
+    """
+    Auto-create baseline_v1 after the first successful training run.
+
+    If any baseline already exists in the model_bank, this is a no-op.
+    If no baseline exists, creates 'baseline_v1' from the training run and activates it.
+    """
+    from utils.baseline_manager import BaselineManager
+
+    mgr = BaselineManager(str(project_root / "model_bank"))
+    if mgr.list_baselines():
+        return  # at least one baseline already exists
+
+    run_dir = (training_results or {}).get("output_dir", "")
+    if not run_dir:
+        logger.warning("Cannot auto-create baseline: training results do not include output_dir.")
+        return
+
+    run_id = Path(run_dir).name
+    try:
+        mgr.create_baseline(
+            run_id=run_id,
+            baseline_name="baseline_v1",
+            description="Auto-created from first successful training run",
+            auto_activate=True,
+        )
+        print(f"\n  [Baseline] Auto-created baseline_v1 from run: {run_id}")
+        print("  [Baseline] baseline_v1 is now the active baseline.")
+        print("  [Baseline] Challengers will compare against baseline_v1 by default.")
+    except Exception as exc:
+        logger.warning("Could not auto-create baseline_v1: %s", exc)
+
+
+def _create_named_baseline(project_root: Path, baseline_name: str = None):
+    """
+    Create a named baseline from the latest training run.
+
+    If baseline_name is None, auto-increments: baseline_v1, baseline_v2, ...
+    """
+    import json
+    from utils.baseline_manager import BaselineManager
+
+    model_bank = project_root / "model_bank"
+    run_dirs = sorted(
+        [d for d in model_bank.iterdir()
+         if d.is_dir() and (d.name.startswith("four_phase_") or d.name.startswith("rolling_training_v2_"))],
+        reverse=True,
+    )
+    if not run_dirs:
+        print("  ERROR: No training result directories found. Run training first.")
+        return None
+
+    latest = run_dirs[0]
+    run_id = latest.name
+
+    mgr = BaselineManager(str(model_bank))
+    if baseline_name is None:
+        existing = mgr.list_baselines()
+        n = len(existing) + 1
+        baseline_name = f"baseline_v{n}"
+
+    try:
+        mgr.create_baseline(
+            run_id=run_id,
+            baseline_name=baseline_name,
+            description=f"Created from run {run_id}",
+            auto_activate=True,
+        )
+        print(f"\n  [Baseline] Created and activated '{baseline_name}' from run: {run_id}")
+        return baseline_name
+    except Exception as exc:
+        print(f"  ERROR: Could not create baseline '{baseline_name}': {exc}")
+        return None
 
 
 # ============================================
@@ -146,6 +231,9 @@ def run_training_pipeline(
         lower_threshold=lower_threshold,
         upper_threshold=upper_threshold,
     )
+
+    # Auto-create baseline_v1 on first training run
+    _maybe_create_first_baseline(project_root, results or {})
 
     print("\n" + "=" * 70)
     print("  Four-phase training complete.")
@@ -459,6 +547,11 @@ Examples:
         action="store_true",
         help="Generate baseline comparison report for a challenger (requires --challenger)",
     )
+    mode_group.add_argument(
+        "--create-baseline",
+        action="store_true",
+        help="Create and activate a baseline from the latest training run",
+    )
 
     # Challenger selection (used with --compare-baseline)
     parser.add_argument(
@@ -466,6 +559,15 @@ Examples:
         type=str,
         choices=["c2", "c3"],
         help="Challenger ID for --compare-baseline",
+    )
+
+    # Baseline name (used with --create-baseline)
+    parser.add_argument(
+        "--baseline-name",
+        type=str,
+        default=None,
+        dest="baseline_name",
+        help="Baseline name for --create-baseline (default: auto-increment baseline_v1, v2, ...)",
     )
 
     # Thresholds (fallback; Phase 3 recommended values take priority)
@@ -558,6 +660,7 @@ Examples:
     elif args.compare_baseline:
         if not args.challenger:
             parser.error("--compare-baseline requires --challenger {c2,c3}")
+        from utils.challenger_manager import load_active_baseline_metrics
         challenger_id = args.challenger
         exp_dir = PROJECT_ROOT / "model_bank" / "experiments" / (
             "c2_feature_pruning" if challenger_id == "c2" else "c3_decision_tuning"
@@ -569,13 +672,20 @@ Examples:
             print("       Run --run-c2 or --run-c3 first.")
             return
         challenger_metrics = json.loads(summary_path.read_text(encoding="utf-8"))
+        active_baseline = load_active_baseline_metrics(PROJECT_ROOT)
         report_path = compare_against_baseline(
             challenger_id=challenger_id,
             challenger_metrics=challenger_metrics,
-            baseline_metrics=BASELINE_V1_METRICS,
+            baseline_metrics=active_baseline,
             output_dir=exp_dir,
         )
         print(f"\nComparison report saved: {report_path}")
+
+    elif args.create_baseline:
+        name = _create_named_baseline(PROJECT_ROOT, baseline_name=args.baseline_name)
+        if name:
+            print(f"\nBaseline '{name}' is now active.")
+            print("Future challengers will compare against this baseline.")
 
     else:
         # Default: Data + Training (no monitoring)
