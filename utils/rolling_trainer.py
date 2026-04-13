@@ -1,8 +1,8 @@
 """
 Rolling Training Module (LEGACY)
 =================================
-⚠️ 此模組為 legacy / backward compatibility 用途。
-⚠️ 正式主訓練架構已改用 four_phase_trainer.py (FourPhaseTrainer)。
+WARNING: 此模組為 legacy / backward compatibility 用途。
+WARNING: 正式主訓練架構已改用 four_phase_trainer.py (FourPhaseTrainer)。
 
 保留原因：
 1. 向後相容：部分 notebook / 分析腳本可能仍引用此模組
@@ -1225,7 +1225,7 @@ class RollingTrainer:
             base_model.fit(X, y)
             self.final_champion_model = base_model
         
-        logger.info("✓ Final Champion Model 訓練完成")
+        logger.info("OK: Final Champion Model 訓練完成")
         
         # 評估 in-sample
         y_pred_proba = self.final_champion_model.predict_proba(X)[:, 1]
@@ -1345,7 +1345,7 @@ class RollingTrainer:
         
         rolling_df = pd.DataFrame(rolling_records)
         rolling_df.to_csv(output_dir / "rolling_results.csv", index=False, encoding='utf-8-sig')
-        logger.info("  ✓ rolling_results.csv")
+        logger.info("  OK: rolling_results.csv")
         
         # 2. champion_summary.json
         champion_data = {
@@ -1364,7 +1364,7 @@ class RollingTrainer:
         
         with open(output_dir / "champion_summary.json", 'w', encoding='utf-8') as f:
             json.dump(champion_data, f, ensure_ascii=False, indent=2)
-        logger.info("  ✓ champion_summary.json")
+        logger.info("  OK: champion_summary.json")
         
         # 3. oot_predictions.csv
         if predictions_df is not None:
@@ -1373,13 +1373,13 @@ class RollingTrainer:
                 index=False, 
                 encoding='utf-8-sig'
             )
-            logger.info("  ✓ oot_predictions.csv")
+            logger.info("  OK: oot_predictions.csv")
         
         # 4. oot_metrics.json
         if oot_metrics is not None:
             with open(output_dir / "oot_metrics.json", 'w', encoding='utf-8') as f:
                 json.dump(oot_metrics, f, ensure_ascii=False, indent=2)
-            logger.info("  ✓ oot_metrics.json")
+            logger.info("  OK: oot_metrics.json")
         
         # 5. zone_summary.csv
         if zone_summaries is not None:
@@ -1389,19 +1389,19 @@ class RollingTrainer:
                 index=False, 
                 encoding='utf-8-sig'
             )
-            logger.info("  ✓ zone_summary.csv")
+            logger.info("  OK: zone_summary.csv")
         
         # 6. 儲存模型
         if self.final_champion_model is not None:
             model_path = output_dir / "final_champion_model.pkl"
             with open(model_path, 'wb') as f:
                 pickle.dump(self.final_champion_model, f)
-            logger.info("  ✓ final_champion_model.pkl")
+            logger.info("  OK: final_champion_model.pkl")
         
         # 7. 儲存 feature names
         with open(output_dir / "feature_names.json", 'w', encoding='utf-8') as f:
             json.dump(self.feature_names, f, ensure_ascii=False, indent=2)
-        logger.info("  ✓ feature_names.json")
+        logger.info("  OK: feature_names.json")
         
         return output_dir
     

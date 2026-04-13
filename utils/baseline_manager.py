@@ -93,7 +93,7 @@ class BaselineManager:
     目錄結構：
         model_bank/
         ├── baselines/
-        │   ├── active_baseline.json    ← 目前使用的 baseline 指標
+        │   ├── active_baseline.json    <- 目前使用的 baseline 指標
         │   ├── baseline_v1/
         │   │   ├── baseline_metadata.json
         │   │   ├── model/
@@ -104,7 +104,7 @@ class BaselineManager:
         │   │   └── metadata/
         │   └── baseline_v2/
         │       └── ...
-        └── four_phase_XXXXXXXX_XXXXXX/  ← 原始 run
+        └── four_phase_XXXXXXXX_XXXXXX/  <- 原始 run
     """
 
     SUBDIRS = ["model", "artifacts", "metrics", "policy", "predictions", "metadata"]
@@ -170,7 +170,7 @@ class BaselineManager:
         # 產出 baseline_summary.md
         self._generate_summary_md(metadata, baseline_dir)
 
-        logger.info(f"✓ Baseline 建立完成: {baseline_name}")
+        logger.info(f"OK: Baseline 建立完成: {baseline_name}")
 
         if auto_activate:
             self.activate_baseline(baseline_name)
@@ -214,7 +214,7 @@ class BaselineManager:
         with open(self.active_file, "w", encoding="utf-8") as f:
             json.dump(active, f, ensure_ascii=False, indent=2)
 
-        logger.info(f"✓ Active baseline 已切換: {baseline_name}")
+        logger.info(f"OK: Active baseline 已切換: {baseline_name}")
 
     def get_active_baseline(self) -> Optional[Dict]:
         """取得目前 active baseline"""
@@ -303,7 +303,7 @@ class BaselineManager:
             va = info[name_a]
             vb = info[name_b]
             delta = info["delta"]
-            status = "✓ 改善" if info["improved"] else "✗ 退步"
+            status = "OK: 改善" if info["improved"] else "FAIL: 退步"
             if abs(delta) < 1e-6:
                 status = "— 相同"
             lines.append(
@@ -477,7 +477,7 @@ class BaselineManager:
             "",
             f"> **建立日期**: {m['created_at'][:10]}  ",
             f"> **來源 Run**: `{m['source_run']['run_folder']}`  ",
-            f"> **狀態**: ✅ Active Baseline  ",
+            f"> **狀態**: OK Active Baseline  ",
             "",
             "---",
             "",
@@ -518,20 +518,20 @@ class BaselineManager:
             "|------|-----|",
             f"| Lower Threshold | **{t.get('lower_threshold', 0)}** |",
             f"| Upper Threshold | **{t.get('upper_threshold', 0)}** |",
-            f"| 通過硬約束 | {'✅' if t.get('passes_hard_constraints') else '❌'} |",
+            f"| 通過硬約束 | {'OK' if t.get('passes_hard_constraints') else 'FAIL'} |",
             "",
             "## 5. 營運指標",
             "",
             "| 項目 | 值 | 狀態 |",
             "|------|-----|------|",
-            f"| 自動決策率 | {bc.get('auto_decision_rate', 0):.2%} | {'✅' if bc.get('auto_decision_rate', 0) >= 0.85 else '❌'} |",
-            f"| 人工審核率 | {bc.get('manual_review_load', 0):.2%} | {'✅' if bc.get('manual_review_load', 0) <= 0.15 else '❌'} |",
+            f"| 自動決策率 | {bc.get('auto_decision_rate', 0):.2%} | {'OK' if bc.get('auto_decision_rate', 0) >= 0.85 else 'FAIL'} |",
+            f"| 人工審核率 | {bc.get('manual_review_load', 0):.2%} | {'OK' if bc.get('manual_review_load', 0) <= 0.15 else 'FAIL'} |",
             "",
             "## 6. 診斷",
             "",
-            f"- 過擬合: {'⚠️ ' + d.get('overfitting_severity', '') if d.get('is_overfitting') else '✅ 無'}",
-            f"- 校準問題: {'⚠️ 有' if d.get('has_calibration_issue') else '✅ 無'}",
-            f"- 拒絕偵測問題: {'⚠️ 有' if d.get('has_reject_detection_issue') else '✅ 無'}",
+            f"- 過擬合: {'WARNING: ' + d.get('overfitting_severity', '') if d.get('is_overfitting') else 'OK 無'}",
+            f"- 校準問題: {'WARNING: 有' if d.get('has_calibration_issue') else 'OK 無'}",
+            f"- 拒絕偵測問題: {'WARNING: 有' if d.get('has_reject_detection_issue') else 'OK 無'}",
             "",
             "---",
             "",
@@ -590,14 +590,14 @@ if __name__ == "__main__":
             baseline_name=args.name,
             description=args.description,
         )
-        print(f"✓ Baseline 已建立: {baseline_dir}")
+        print(f"OK: Baseline 已建立: {baseline_dir}")
 
     if args.list:
         active_info = mgr.get_active_baseline()
         active_name = active_info["active_baseline"] if active_info else None
         print("Baselines:")
         for name in mgr.list_baselines():
-            marker = " ← ACTIVE" if name == active_name else ""
+            marker = " <- ACTIVE" if name == active_name else ""
             meta = mgr.get_baseline_metadata(name)
             auc = meta.get("holdout_metrics", {}).get("auc", 0)
             run = meta.get("source_run", {}).get("run_id", "")
@@ -609,7 +609,7 @@ if __name__ == "__main__":
 
     if args.activate:
         mgr.activate_baseline(args.activate)
-        print(f"✓ Active baseline: {args.activate}")
+        print(f"OK: Active baseline: {args.activate}")
 
     if args.compare:
         mgr.print_comparison(args.compare[0], args.compare[1])

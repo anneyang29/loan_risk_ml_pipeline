@@ -121,7 +121,7 @@ def drop_missing_key_rows(df: DataFrame) -> DataFrame:
     before_count = df.count()
     df = df.dropna(subset=["案件編號", "進件日", "授信結果"])
     after_count = df.count()
-    logger.info(f"刪除缺失 key/date/label: {before_count} → {after_count} ({before_count - after_count} 筆)")
+    logger.info(f"刪除缺失 key/date/label: {before_count} -> {after_count} ({before_count - after_count} 筆)")
     return df
 
 
@@ -134,7 +134,7 @@ def deduplicate(df: DataFrame) -> DataFrame:
     df = df.filter(F.col("rn") == 1).drop("rn")
     
     after_count = df.count()
-    logger.info(f"去重複: {before_count} → {after_count} ({before_count - after_count} 筆)")
+    logger.info(f"去重複: {before_count} -> {after_count} ({before_count - after_count} 筆)")
     return df
 
 
@@ -463,7 +463,7 @@ def run_silver_pipeline(
                     audit_logger.add_record(audit_record)
                     raise ValueError(error_msg)
                 else:
-                    logger.warning(f"⚠️ {error_msg}，但繼續處理...")
+                    logger.warning(f"WARNING: {error_msg}，但繼續處理...")
             
             # 記錄警告
             for warning in validation_report.warnings:
@@ -518,7 +518,7 @@ def run_silver_pipeline(
             if output_report.overall_status == "FAIL":
                 for error in output_report.errors:
                     audit_record.errors.append(error.message)
-                logger.warning("⚠️ Silver 輸出驗證有錯誤")
+                logger.warning("WARNING: Silver 輸出驗證有錯誤")
         
         # ============================================
         # 6. 儲存 Silver
@@ -573,5 +573,5 @@ if __name__ == "__main__":
     output_path = run_silver_pipeline(project_root)
     
     logger.info("=" * 60)
-    logger.info(f"✓ Silver Layer 完成！輸出: {output_path}")
+    logger.info(f"OK: Silver Layer 完成！輸出: {output_path}")
     logger.info("=" * 60)

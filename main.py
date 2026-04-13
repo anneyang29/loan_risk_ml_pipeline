@@ -1,29 +1,30 @@
 """
-ML Pipeline 主程式入口點
+ML Pipeline main entry point
 ============================
-使用 Four Phase Trainer 架構執行完整的信用風險模型訓練流程
+Uses the Four Phase Trainer architecture for credit risk model training.
 
-四階段流程：
-1. Phase 1: Model Development (18 個月 Rolling Training)
-2. Phase 2: Champion Retraining (用完整 development data 重訓 → 產出 Final Champion Artifact)
-3. Phase 3: Policy Validation (4 個月，threshold / zone policy tuning)
-4. Phase 4: Final Blind Holdout (最後 2 個月，完全不調模型與 threshold)
+Four-phase flow:
+1. Phase 1: Model Development (18-month rolling training)
+2. Phase 2: Champion Retraining (full development data -> Final Champion Artifact)
+3. Phase 3: Policy Validation (4 months, threshold / zone policy tuning)
+4. Phase 4: Final Blind Holdout (last 2 months, model and threshold frozen)
 
-重要術語：
-- Champion Strategy: 模型 + imbalance strategy + 設定組合（Phase 1 選出）
-- Final Champion Artifact: 用 Champion Strategy 在完整 development data 重訓的實際模型檔案（Phase 2 產出）
-- Policy Validation: threshold / zone policy tuning window（Phase 3，4 個月）
-- Final Blind Holdout: 完全不調模型與 threshold 的最終驗證集（Phase 4，2 個月）
-- Production Batch Scoring: 上線後的批次推論，沒有即時 label，只輸出 predictions
+Challenger experiments:
+- C2 Feature Pruning: remove 6 unstable / low-importance features (25 -> 19)
+- C3 Decision Tuning: decision-oriented + anti-overfitting hyperparameter search
 
 Usage:
-    python main.py                             # 執行 Data + Training（預設）
-    python main.py --all                       # 執行完整流程 (Data + Training + Monitoring)
-    python main.py --data-only                 # 只執行 Bronze -> Silver -> Gold
-    python main.py --train-only                # 只執行四階段訓練
-    python main.py --monitor-only              # 只執行 Production Monitoring
-    python main.py --lower-threshold 0.3       # 自訂閾值
-    python main.py --imbalance scale_weight    # 指定不平衡處理方法
+    python main.py                             # Data + Training (default)
+    python main.py --all                       # Data + Training + Monitoring
+    python main.py --data-only                 # Bronze -> Silver -> Gold only
+    python main.py --train-only                # Four-phase training only
+    python main.py --monitor-only              # Production monitoring only
+    python main.py --run-c2                    # C2 Feature Pruning challenger
+    python main.py --run-c3                    # C3 Decision Tuning challenger
+    python main.py --compare-baseline --challenger c2   # Comparison report only
+    python main.py --compare-baseline --challenger c3   # Comparison report only
+    python main.py --lower-threshold 0.3       # Custom threshold (fallback)
+    python main.py --imbalance scale_weight    # Imbalance handling method
 """
 
 import argparse
@@ -49,6 +50,14 @@ from utils.production_monitor import (
     ProductionMonitoringConfig,
     generate_retraining_data_window,
 )
+from utils.challenger_manager import (
+    run_c2_feature_pruning_challenger,
+    run_c3_decision_tuning_challenger,
+    compare_against_baseline,
+    generate_routing_report,
+    BASELINE_V1_METRICS,
+    C2_METRICS,
+)
 
 # 設定 logging
 logging.basicConfig(
@@ -63,43 +72,35 @@ logger = logging.getLogger(__name__)
 # ============================================
 def run_data_pipeline(project_root: Path = None):
     """
-    執行完整的資料處理流程 Bronze -> Silver -> Gold
-
-    每一層都是 function-based pipeline，對齊 utils 裡的實際實作。
+    Run full data processing pipeline: Bronze -> Silver -> Gold.
     """
     if project_root is None:
         project_root = PROJECT_ROOT
 
     print("\n" + "=" * 70)
-    print("  資料處理流程 (Bronze → Silver → Gold)")
+    print("  Data Processing Pipeline (Bronze -> Silver -> Gold)")
     print("=" * 70)
 
-    # ----- Bronze Layer -----
-    print("\n[1/3] Bronze Layer 處理中...")
+    print("\n[1/3] Bronze layer ...")
     bronze_path = run_bronze_pipeline(project_root)
-    print(f"  ✓ Bronze 完成，輸出: {bronze_path}")
+    print(f"  Bronze complete: {bronze_path}")
 
-    # ----- Silver Layer -----
-    print("\n[2/3] Silver Layer 處理中...")
+    print("\n[2/3] Silver layer ...")
     silver_path = run_silver_pipeline(project_root)
-    print(f"  ✓ Silver 完成，輸出: {silver_path}")
+    print(f"  Silver complete: {silver_path}")
 
-    # ----- Gold Layer -----
-    print("\n[3/3] Gold Layer 處理中...")
+    print("\n[3/3] Gold layer ...")
     gold_output_paths = run_gold_pipeline(project_root)
-    print(f"  ✓ Gold 完成")
+    print("  Gold complete")
     for name, path in gold_output_paths.items():
         if name not in ("artifact_files",):
-            print(f"    - {name}: {path}")
+            print(f"    {name}: {path}")
 
-    # Manifest 確認
     if "manifest" in gold_output_paths:
-        print(f"\n  📄 Gold Split Manifest 已輸出:")
-        print(f"     {gold_output_paths['manifest']}")
-        print(f"     說明: 記錄 development / oot 路徑與四階段對應關係")
+        print(f"\n  Gold Split Manifest: {gold_output_paths['manifest']}")
 
     print("\n" + "=" * 70)
-    print("  資料處理流程完成！")
+    print("  Data processing complete.")
     print("=" * 70)
 
     return gold_output_paths
@@ -117,26 +118,23 @@ def run_training_pipeline(
     model_names: list = None,
 ):
     """
-    執行四階段訓練流程
+    Run the four-phase training pipeline.
 
-    唯一主訓練入口，呼叫 four_phase_trainer.run_four_phase_pipeline()。
-    
-    lower/upper_threshold 作為 fallback（Phase 3 推薦優先）。
-    若為 None，使用 run_four_phase_pipeline 的預設值 (0.5 / 0.85)。
+    lower/upper_threshold are fallback values; Phase 3 recommended thresholds take priority.
+    If None, defaults of 0.5 / 0.85 are used.
     """
     if project_root is None:
         project_root = PROJECT_ROOT
-    
-    # 使用預設值 fallback
+
     lower_threshold = lower_threshold or 0.5
     upper_threshold = upper_threshold or 0.85
 
     print("\n" + "=" * 70)
-    print("  四階段訓練流程 (Four Phase Training)")
+    print("  Four Phase Training Pipeline")
     print("=" * 70)
     print(f"  Imbalance Strategy : {imbalance_strategy}")
-    print(f"  Lower Threshold    : {lower_threshold} (fallback, Phase 3 推薦優先)")
-    print(f"  Upper Threshold    : {upper_threshold} (fallback, Phase 3 推薦優先)")
+    print(f"  Lower Threshold    : {lower_threshold} (fallback; Phase 3 recommendation takes priority)")
+    print(f"  Upper Threshold    : {upper_threshold} (fallback; Phase 3 recommendation takes priority)")
     print(f"  Calibration        : {use_calibration}")
     print("=" * 70)
 
@@ -150,7 +148,7 @@ def run_training_pipeline(
     )
 
     print("\n" + "=" * 70)
-    print("  四階段訓練流程完成！")
+    print("  Four-phase training complete.")
     print("=" * 70)
 
     return results
@@ -165,24 +163,17 @@ def run_monitoring_pipeline(
     upper_threshold: float = None,
 ):
     """
-    執行 Production Monitoring
+    Run production monitoring.
 
-    Threshold 優先順序：
-    1. zone_policy_summary.json 中的 selected_lower/upper_threshold (Phase 3 推薦)
-    2. champion_summary.json 中的 threshold_config
-    3. CLI 傳入的 lower_threshold / upper_threshold
-    4. ProductionMonitoringConfig 預設值
+    Threshold resolution order:
+      1. zone_policy_summary.json (Phase 3 recommended)
+      2. champion_summary.json threshold_config
+      3. CLI --lower-threshold / --upper-threshold
+      4. ProductionMonitoringConfig defaults
 
-    Baseline 來源：
-    - 從最新 model_bank 結果中讀取 policy_validation_predictions.csv
-    - Policy Validation 是模型部署前最後一次有 label 的評估階段
-    - 其 score 分布最接近上線後 production 推論的真實分布
-    
-    Monitoring 對象（demonstration 模式）：
-    - 使用 final_holdout_predictions.csv 模擬 production data
-    - 若有真實 production data，應替換為 production 資料
-    - Final Blind Holdout 有真實 label，可算 AUC/F1；
-      真正的 Production Batch Scoring 沒有 label，只能比 PSI / zone shift
+    Baseline: policy_validation_predictions.csv (Phase 3, last labelled window before deployment).
+    Monitoring target (demo mode): final_holdout_predictions.csv.
+    In production, replace with actual production batch scoring data.
     """
     import json
     import numpy as np
@@ -195,119 +186,96 @@ def run_monitoring_pipeline(
     print("  Production Monitoring")
     print("=" * 70)
 
-    # 找最新的 model_bank 結果
     model_bank = project_root / "model_bank"
     if not model_bank.exists():
-        print("  ⚠️ 找不到 model_bank，請先執行 training pipeline")
+        print("  WARNING: model_bank not found; run training pipeline first.")
         return None
 
-    # 找最新 run（支援 four_phase_ 與 legacy rolling_training_v2_ 兩種前綴）
     run_dirs = sorted(
         [d for d in model_bank.iterdir()
          if d.is_dir() and (d.name.startswith("four_phase_") or d.name.startswith("rolling_training_v2_"))],
-        reverse=True
+        reverse=True,
     )
     if not run_dirs:
-        print("  ⚠️ 找不到訓練結果目錄（搜尋 four_phase_* 或 rolling_training_v2_*）")
+        print("  WARNING: No training result directories found (four_phase_* or rolling_training_v2_*).")
         return None
 
     latest_dir = run_dirs[0]
-    print(f"  使用最新訓練結果: {latest_dir.name}")
-    if latest_dir.name.startswith("rolling_training_v2_"):
-        print(f"  ⚠️ 注意：此為 legacy 命名格式，新版訓練會使用 four_phase_* 前綴")
+    print(f"  Using latest training results: {latest_dir.name}")
 
-    # ★ 自動偵測 Phase 3 推薦的 threshold
-    # 優先順序: zone_policy_summary.json → champion_summary.json → CLI 參數 → config 預設值
+    # Threshold resolution
     resolved_lower = lower_threshold
     resolved_upper = upper_threshold
     threshold_source = "default"
-    
+
     zone_policy_path = latest_dir / "zone_policy_summary.json"
-    champion_path = latest_dir / "champion_summary.json"
-    
+    champion_path    = latest_dir / "champion_summary.json"
+
     if zone_policy_path.exists():
-        with open(zone_policy_path, "r", encoding="utf-8") as f:
-            zone_policy = json.load(f)
+        zone_policy = json.loads(zone_policy_path.read_text(encoding="utf-8"))
         if "selected_lower_threshold" in zone_policy:
-            resolved_lower = zone_policy["selected_lower_threshold"]
-            resolved_upper = zone_policy["selected_upper_threshold"]
-            threshold_source = "zone_policy_summary.json (Phase 3 推薦)"
+            resolved_lower   = zone_policy["selected_lower_threshold"]
+            resolved_upper   = zone_policy["selected_upper_threshold"]
+            threshold_source = "zone_policy_summary.json (Phase 3 recommended)"
         elif "recommended_lower_threshold" in zone_policy:
-            resolved_lower = zone_policy["recommended_lower_threshold"]
-            resolved_upper = zone_policy["recommended_upper_threshold"]
+            resolved_lower   = zone_policy["recommended_lower_threshold"]
+            resolved_upper   = zone_policy["recommended_upper_threshold"]
             threshold_source = "zone_policy_summary.json (recommended)"
     elif champion_path.exists():
-        with open(champion_path, "r", encoding="utf-8") as f:
-            champion_info = json.load(f)
+        champion_info = json.loads(champion_path.read_text(encoding="utf-8"))
         tc = champion_info.get("threshold_config", {})
         if tc.get("lower_threshold") is not None:
-            resolved_lower = tc["lower_threshold"]
-            resolved_upper = tc["upper_threshold"]
+            resolved_lower   = tc["lower_threshold"]
+            resolved_upper   = tc["upper_threshold"]
             threshold_source = "champion_summary.json"
-    
-    # CLI 傳入的值優先於檔案偵測（若使用者明確指定）
+
     if lower_threshold is not None:
-        resolved_lower = lower_threshold
-        threshold_source = "CLI 參數"
+        resolved_lower   = lower_threshold
+        threshold_source = "CLI argument"
     if upper_threshold is not None:
-        resolved_upper = upper_threshold
-        threshold_source = "CLI 參數"
-    
-    # 若都沒有，使用 config 預設值
+        resolved_upper   = upper_threshold
+        threshold_source = "CLI argument"
+
     if resolved_lower is None:
         resolved_lower = ProductionMonitoringConfig().default_lower_threshold
     if resolved_upper is None:
         resolved_upper = ProductionMonitoringConfig().default_upper_threshold
-    
-    print(f"\n  ★ Monitoring Threshold:")
-    print(f"     Lower: {resolved_lower}")
-    print(f"     Upper: {resolved_upper}")
-    print(f"     來源: {threshold_source}")
 
-    # 讀取 policy validation predictions（作為 baseline）
-    pv_pred_path = latest_dir / "policy_validation_predictions.csv"
+    print(f"\n  Monitoring threshold:")
+    print(f"    lower : {resolved_lower}")
+    print(f"    upper : {resolved_upper}")
+    print(f"    source: {threshold_source}")
+
+    pv_pred_path    = latest_dir / "policy_validation_predictions.csv"
     holdout_pred_path = latest_dir / "final_holdout_predictions.csv"
 
     if not pv_pred_path.exists():
-        print("  ⚠️ 找不到 policy_validation_predictions.csv")
+        print("  WARNING: policy_validation_predictions.csv not found.")
         return None
 
-    print(f"\n  📊 Baseline 來源:")
-    print(f"     檔案: {pv_pred_path}")
-    print(f"     說明: Phase 3 Policy Validation 的預測機率")
-    print(f"     原因: 部署前最後一次有 label 的評估，score 分布最接近 production")
-
-    # Baseline = policy validation 的 score distribution
+    print(f"\n  Baseline source: {pv_pred_path}")
     pv_df = pd.read_csv(pv_pred_path)
     baseline_scores = pv_df["pred_prob"].values
-    print(f"     樣本數: {len(baseline_scores)}")
-    print(f"     Score 平均: {baseline_scores.mean():.4f}, 標準差: {baseline_scores.std():.4f}")
+    print(f"    Rows: {len(baseline_scores)}  Mean score: {baseline_scores.mean():.4f}")
 
-    # 建立 monitor（使用 resolved threshold）
-    config = ProductionMonitoringConfig(
+    config  = ProductionMonitoringConfig(
         default_lower_threshold=resolved_lower,
         default_upper_threshold=resolved_upper,
     )
     monitor = ProductionMonitor(config=config)
     monitor.set_baseline(baseline_scores, resolved_lower, resolved_upper)
 
-    # 讀取 champion_summary 取得 training date
-    champion_path = latest_dir / "champion_summary.json"
     if champion_path.exists():
-        with open(champion_path, "r", encoding="utf-8") as f:
-            champion_info = json.load(f)
+        champion_info = json.loads(champion_path.read_text(encoding="utf-8"))
         monitor.set_last_training_date(champion_info.get("created_at", "")[:10])
 
-    # 如果有 holdout predictions → 使用它來做 monitoring demo
     if holdout_pred_path.exists():
-        print(f"\n  📋 Monitoring 對象 (demonstration):")
-        print(f"     檔案: {holdout_pred_path}")
-        print(f"     說明: Phase 4 Final Blind Holdout 預測結果")
-        print(f"     ⚠️ 真實 production 環境應替換為 production batch scoring 資料")
+        print(f"\n  Monitoring target (demo): {holdout_pred_path}")
+        print("  NOTE: Replace with production batch scoring data in live deployment.")
 
-        holdout_df = pd.read_csv(holdout_pred_path)
+        holdout_df  = pd.read_csv(holdout_pred_path)
         predictions = holdout_df["pred_prob"].values
-        labels = holdout_df["actual_label"].values if "actual_label" in holdout_df.columns else None
+        labels      = holdout_df["actual_label"].values if "actual_label" in holdout_df.columns else None
 
         result = monitor.run_production_monitoring(
             predictions=predictions,
@@ -319,26 +287,24 @@ def run_monitoring_pipeline(
             upper_threshold=resolved_upper,
         )
 
-        # 儲存結果（含 threshold metadata）
         output_dir = project_root / "model_bank" / "monitoring"
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        ts          = datetime.now().strftime("%Y%m%d_%H%M%S")
         result_path = output_dir / f"monitoring_result_{ts}.json"
-        
-        # 在 monitoring result 中加入 threshold metadata
+
         result_dict = result.to_dict()
         result_dict["threshold_config"] = {
             "lower_threshold": resolved_lower,
             "upper_threshold": resolved_upper,
             "source": threshold_source,
         }
-        
-        with open(result_path, "w", encoding="utf-8") as f:
-            json.dump(result_dict, f, ensure_ascii=False, indent=2)
-        print(f"  ✓ Monitoring 結果儲存至: {result_path}")
 
-        # Retraining Decision
+        result_path.write_text(
+            json.dumps(result_dict, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        print(f"  Monitoring result saved: {result_path}")
+
         decision = {
             "timestamp": ts,
             "needs_retraining": result.needs_retraining,
@@ -354,13 +320,14 @@ def run_monitoring_pipeline(
             decision["retraining_window"] = window
 
         decision_path = output_dir / f"retraining_decision_{ts}.json"
-        with open(decision_path, "w", encoding="utf-8") as f:
-            json.dump(decision, f, ensure_ascii=False, indent=2)
-        print(f"  ✓ Retraining decision 儲存至: {decision_path}")
+        decision_path.write_text(
+            json.dumps(decision, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        print(f"  Retraining decision saved: {decision_path}")
 
         return result
     else:
-        print("  ⚠️ 找不到 final_holdout_predictions.csv，無法執行 monitoring")
+        print("  WARNING: final_holdout_predictions.csv not found; monitoring skipped.")
         return None
 
 
@@ -377,27 +344,27 @@ def run_full_pipeline(
     include_monitoring: bool = False,
 ):
     """
-    執行完整流程：資料處理 + 四階段訓練 + (可選) Production Monitoring
+    Run the full pipeline: data processing + four-phase training + (optional) production monitoring.
 
     Args:
-        lower_threshold: fallback 閾值，Phase 3 推薦優先。None → 使用預設 0.5
-        upper_threshold: fallback 閾值，Phase 3 推薦優先。None → 使用預設 0.85
-        include_monitoring: 若為 True，訓練完成後自動執行 Monitoring
+        lower_threshold: Fallback threshold. Phase 3 recommended value takes priority.
+        upper_threshold: Fallback threshold. Phase 3 recommended value takes priority.
+        include_monitoring: If True, run monitoring after training.
     """
     if project_root is None:
         project_root = PROJECT_ROOT
 
     print("\n" + "=" * 80)
-    print("  ML PIPELINE - 完整流程")
+    print("  ML PIPELINE - Full Run")
     print("  Four Phase Training Architecture")
     if include_monitoring:
-        print("  (含 Production Monitoring)")
+        print("  (includes Production Monitoring)")
     print("=" * 80)
 
-    # Step 1: 資料處理
+    # Step 1: Data processing
     run_data_pipeline(project_root)
 
-    # Step 2: 四階段訓練
+    # Step 2: Four-phase training
     results = run_training_pipeline(
         project_root=project_root,
         lower_threshold=lower_threshold,
@@ -407,8 +374,8 @@ def run_full_pipeline(
         model_names=model_names,
     )
 
-    # Step 3: Production Monitoring（可選）
-    # ★ 使用 training 結果中的 selected threshold（Phase 3 推薦），而非 CLI default
+    # Step 3: Production monitoring (optional)
+    # Use Phase 3 selected thresholds from training results when available.
     monitoring_result = None
     if include_monitoring:
         selected_lower = None
@@ -416,7 +383,7 @@ def run_full_pipeline(
         if results and isinstance(results, dict):
             selected_lower = results.get("selected_lower_threshold")
             selected_upper = results.get("selected_upper_threshold")
-        
+
         monitoring_result = run_monitoring_pipeline(
             project_root=project_root,
             lower_threshold=selected_lower,
@@ -424,9 +391,9 @@ def run_full_pipeline(
         )
 
     print("\n" + "=" * 80)
-    print("  完整流程執行完畢！")
+    print("  Full pipeline complete.")
     if include_monitoring:
-        print("  ✓ Data Pipeline → Training → Monitoring 全部完成")
+        print("  Steps completed: Data Pipeline -> Training -> Monitoring")
     print("=" * 80)
 
     return {"training": results, "monitoring": monitoring_result}
@@ -436,74 +403,99 @@ def run_full_pipeline(
 # CLI Entry Point
 # ============================================
 def main():
-    """主程式入口"""
+    """CLI entry point."""
     parser = argparse.ArgumentParser(
         description="ML Pipeline - Four Phase Training Architecture",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-範例用法：
-  python main.py                               # 執行 Data + Training（預設）
-  python main.py --all                         # 一路到底：Data + Training + Monitoring
-  python main.py --data-only                   # 只執行資料處理
-  python main.py --train-only                  # 只執行訓練
-  python main.py --monitor-only                # 只執行 Production Monitoring
-  python main.py --lower-threshold 0.35        # 自訂閾值
-  python main.py --imbalance scale_weight      # 指定不平衡處理方法
-  python main.py --imbalance smote             # 使用 SMOTE（需安裝 imbalanced-learn）
+Examples:
+  python main.py                              # Run Data + Training (default)
+  python main.py --all                        # Data + Training + Monitoring
+  python main.py --data-only                  # Data processing only
+  python main.py --train-only                 # Training only (requires Gold data)
+  python main.py --monitor-only               # Production monitoring only
+  python main.py --run-c2                     # Run C2 Feature Pruning challenger
+  python main.py --run-c3                     # Run C3 Decision Tuning challenger
+  python main.py --compare-baseline --challenger c2   # Generate comparison report
+  python main.py --lower-threshold 0.35       # Custom threshold
+  python main.py --imbalance smote            # Use SMOTE resampling
         """
     )
 
-    # 模式選擇（互斥）
+    # Mode selection (mutually exclusive)
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument(
         "--data-only",
         action="store_true",
-        help="只執行資料處理流程 (Bronze -> Silver -> Gold)"
+        help="Run data processing pipeline only (Bronze -> Silver -> Gold)",
     )
     mode_group.add_argument(
         "--train-only",
         action="store_true",
-        help="只執行四階段訓練流程（需已有 Gold 資料）"
+        help="Run four-phase training only (requires Gold data)",
     )
     mode_group.add_argument(
         "--monitor-only",
         action="store_true",
-        help="只執行 Production Monitoring（需已有訓練結果）"
+        help="Run production monitoring only (requires trained model)",
     )
     mode_group.add_argument(
         "--all",
         action="store_true",
-        help="執行完整流程：Data + Training + Monitoring（一路到底）"
+        help="Run full pipeline: Data + Training + Monitoring",
+    )
+    mode_group.add_argument(
+        "--run-c2",
+        action="store_true",
+        help="Run C2 Feature Pruning challenger (outputs to model_bank/experiments/c2_feature_pruning/)",
+    )
+    mode_group.add_argument(
+        "--run-c3",
+        action="store_true",
+        help="Run C3 Decision Tuning challenger (outputs to model_bank/experiments/c3_decision_tuning/)",
+    )
+    mode_group.add_argument(
+        "--compare-baseline",
+        action="store_true",
+        help="Generate baseline comparison report for a challenger (requires --challenger)",
     )
 
-    # Threshold（作為 fallback，Phase 3 推薦值優先）
+    # Challenger selection (used with --compare-baseline)
+    parser.add_argument(
+        "--challenger",
+        type=str,
+        choices=["c2", "c3"],
+        help="Challenger ID for --compare-baseline",
+    )
+
+    # Thresholds (fallback; Phase 3 recommended values take priority)
     parser.add_argument(
         "--lower-threshold",
         type=float,
         default=None,
-        help="三區間下限閾值 (不指定則自動使用 Phase 3 推薦值，再 fallback 到 0.5)"
+        help="Zone lower threshold (default: auto-detect from Phase 3 outputs, fallback 0.5)",
     )
     parser.add_argument(
         "--upper-threshold",
         type=float,
         default=None,
-        help="三區間上限閾值 (不指定則自動使用 Phase 3 推薦值，再 fallback 到 0.85)"
+        help="Zone upper threshold (default: auto-detect from Phase 3 outputs, fallback 0.85)",
     )
 
-    # Imbalance
+    # Imbalance handling
     parser.add_argument(
         "--imbalance",
         type=str,
         default="scale_weight",
         choices=["scale_weight", "class_weight", "smote", "undersample", "none"],
-        help="不平衡資料處理方法 (default: scale_weight，推薦)"
+        help="Class imbalance strategy (default: scale_weight)",
     )
 
     # Calibration
     parser.add_argument(
         "--no-calibration",
         action="store_true",
-        help="不使用 probability calibration"
+        help="Disable probability calibration",
     )
 
     # Model selection
@@ -511,12 +503,11 @@ def main():
         "--models",
         nargs="+",
         default=None,
-        help="指定候選模型 (e.g., xgboost random_forest logistic_regression)"
+        help="Candidate model names (e.g., xgboost random_forest logistic_regression)",
     )
 
     args = parser.parse_args()
 
-    # 根據參數決定執行模式
     if args.data_only:
         run_data_pipeline()
 
@@ -536,7 +527,6 @@ def main():
         )
 
     elif args.all:
-        # Data + Training + Monitoring 一路到底
         run_full_pipeline(
             lower_threshold=args.lower_threshold,
             upper_threshold=args.upper_threshold,
@@ -546,8 +536,49 @@ def main():
             include_monitoring=True,
         )
 
+    elif args.run_c2:
+        result = run_c2_feature_pruning_challenger(project_root=PROJECT_ROOT)
+        if result:
+            print(f"\nC2 challenger complete.")
+            print(f"  Output : {result.get('output_dir', 'N/A')}")
+            print(f"  Upgrade: {result.get('upgrade_candidate', 'N/A')}")
+            if result.get("upgrade_reason"):
+                print(f"  Reason : {result['upgrade_reason']}")
+
+    elif args.run_c3:
+        result = run_c3_decision_tuning_challenger(project_root=PROJECT_ROOT)
+        if result:
+            print(f"\nC3 challenger complete.")
+            print(f"  Output    : {result.get('output_dir', 'N/A')}")
+            print(f"  Best model: {result.get('best_candidate', 'N/A')}")
+            print(f"  Upgrade   : {result.get('upgrade_candidate', 'N/A')}")
+            if result.get("upgrade_reason"):
+                print(f"  Reason    : {result['upgrade_reason']}")
+
+    elif args.compare_baseline:
+        if not args.challenger:
+            parser.error("--compare-baseline requires --challenger {c2,c3}")
+        challenger_id = args.challenger
+        exp_dir = PROJECT_ROOT / "model_bank" / "experiments" / (
+            "c2_feature_pruning" if challenger_id == "c2" else "c3_decision_tuning"
+        )
+        import json
+        summary_path = exp_dir / "challenger_summary.json"
+        if not summary_path.exists():
+            print(f"ERROR: challenger_summary.json not found at {exp_dir}")
+            print("       Run --run-c2 or --run-c3 first.")
+            return
+        challenger_metrics = json.loads(summary_path.read_text(encoding="utf-8"))
+        report_path = compare_against_baseline(
+            challenger_id=challenger_id,
+            challenger_metrics=challenger_metrics,
+            baseline_metrics=BASELINE_V1_METRICS,
+            output_dir=exp_dir,
+        )
+        print(f"\nComparison report saved: {report_path}")
+
     else:
-        # 預設執行 Data + Training（不含 Monitoring）
+        # Default: Data + Training (no monitoring)
         run_full_pipeline(
             lower_threshold=args.lower_threshold,
             upper_threshold=args.upper_threshold,

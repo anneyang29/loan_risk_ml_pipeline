@@ -244,7 +244,7 @@ class FeatureEncodingConfig:
         "WTCD(婉拒)": 0,
     })
     
-    # 教育程度推斷規則（職業 → 教育程度）
+    # 教育程度推斷規則（職業 -> 教育程度）
     education_inference_rules: Dict[str, str] = field(default_factory=lambda: {
         "學生(大專生)": "大學",
         "學生(高中職生)": "高中",
@@ -352,9 +352,9 @@ class TimePeriodConfig:
     """
     時間區間設定 — LEGACY
     
-    ⚠️ 此 Config 僅供 Gold Layer (data_processing_gold_table) 使用，
+    WARNING: 此 Config 僅供 Gold Layer (data_processing_gold_table) 使用，
        用來定義 development / oot 的原始切分點與 Rolling Window 參數。
-    ⚠️ 四階段訓練架構的主設定請使用 PhaseConfigV2。
+    WARNING: 四階段訓練架構的主設定請使用 PhaseConfigV2。
     """
     version: str = "1.0.0"
     
@@ -389,7 +389,7 @@ class PhaseConfigV2:
     """
     四階段架構的時間設定 — ACTIVE（Source of Truth）
     
-    ✅ 這是四階段訓練流程的主設定，由 FourPhaseTrainer 與 main.py 使用。
+    OK 這是四階段訓練流程的主設定，由 FourPhaseTrainer 與 main.py 使用。
     
     Phase 1: Development (Rolling Training) - 18個月
     Phase 2: Champion Retraining (用全部 development 重訓)
@@ -566,9 +566,9 @@ class ChampionSelectionConfig:
     控制各指標在 overall_score 中的權重
     
     設計理念：
-    - 信用風險模型重視「拒絕壞客戶」的能力 → f1_reject 最重要
-    - 跨 cycle 穩定性是生產可靠性的基礎 → stability 懲罰加重
-    - KS 反映區分好壞客戶的能力 → 比純 AUC 更有業務意義
+    - 信用風險模型重視「拒絕壞客戶」的能力 -> f1_reject 最重要
+    - 跨 cycle 穩定性是生產可靠性的基礎 -> stability 懲罰加重
+    - KS 反映區分好壞客戶的能力 -> 比純 AUC 更有業務意義
     - CV AUC 作為基礎校驗，不應主導排名
     """
     version: str = "1.0.0"
@@ -606,21 +606,21 @@ class MonitoringConfigV2:
     version: str = "2.0.0"
     
     # Metric Triggers (低於閾值觸發 retraining)
-    min_auc: float = 0.85               # ← 提高（原 0.75），AUC 低於 0.85 即需檢視
-    min_f1_reject: float = 0.30         # ← 提高（原 0.20），reject 辨識力門檻
+    min_auc: float = 0.85               # <- 提高（原 0.75），AUC 低於 0.85 即需檢視
+    min_f1_reject: float = 0.30         # <- 提高（原 0.20），reject 辨識力門檻
     max_score_psi: float = 0.25
     
     # Time Trigger
     retrain_interval_months: int = 6  # 每 6 個月強制 review
     
     # Warning Thresholds (不觸發 retraining，但要警示)
-    warning_auc: float = 0.88           # ← 提高（原 0.80）
+    warning_auc: float = 0.88           # <- 提高（原 0.80）
     warning_score_psi: float = 0.10
-    warning_zone_shift: float = 0.10    # ← 降低（原 0.15），更敏感偵測 zone 變化
+    warning_zone_shift: float = 0.10    # <- 降低（原 0.15），更敏感偵測 zone 變化
     
     # Default Zone Thresholds
-    default_lower_threshold: float = 0.5   # ← 提高（原 0.4），搭配更嚴格的三區分配
-    default_upper_threshold: float = 0.85  # ← 提高（原 0.7），避免 96%+ 自動核准
+    default_lower_threshold: float = 0.5   # <- 提高（原 0.4），搭配更嚴格的三區分配
+    default_upper_threshold: float = 0.85  # <- 提高（原 0.7），避免 96%+ 自動核准
     
     # PSI 計算設定
     psi_n_bins: int = 10

@@ -1,8 +1,8 @@
 """
 Model Training - Legacy Entry Point
 =====================================
-⚠️ 此檔案為 legacy / backward compatibility 用途。
-⚠️ 正式主訓練流程請使用 main.py (Four Phase Training Architecture)。
+WARNING: 此檔案為 legacy / backward compatibility 用途。
+WARNING: 正式主訓練流程請使用 main.py (Four Phase Training Architecture)。
 
 如果你正在尋找正式的訓練入口：
     python main.py                     # 完整流程
@@ -198,15 +198,15 @@ def main():
         registry = ModelRegistry(model_bank_path)
         
         if args.list_models:
-            print("\n📦 Models in Registry:")
+            print("\n Models in Registry:")
             print("-" * 50)
             for v in registry.list_models():
                 r = registry.records[v]
                 status = []
                 if r.is_best:
-                    status.append("⭐ BEST")
+                    status.append(" BEST")
                 if r.is_production:
-                    status.append("🚀 PROD")
+                    status.append(" PROD")
                 status_str = f" {' '.join(status)}" if status else ""
                 print(f"  {v}{status_str}")
                 print(f"    AUC: {r.auc_test:.4f} | GINI: {r.gini_test:.4f}")
@@ -219,16 +219,16 @@ def main():
         
         if args.set_best:
             registry.set_best_model(args.set_best, reason="Manually selected")
-            print(f"✓ Best model set to: {args.set_best}")
+            print(f"OK: Best model set to: {args.set_best}")
             return
     
     # ============================================
-    # 模型訓練 → 轉接到 Four Phase Pipeline
+    # 模型訓練 -> 轉接到 Four Phase Pipeline
     # ============================================
     logger.warning("=" * 70)
-    logger.warning("⚠️  train.py 是 legacy entry point")
-    logger.warning("⚠️  正式主流程請使用: python main.py")
-    logger.warning("⚠️  現在將轉接到 Four Phase Training Pipeline...")
+    logger.warning("WARNING:  train.py 是 legacy entry point")
+    logger.warning("WARNING:  正式主流程請使用: python main.py")
+    logger.warning("WARNING:  現在將轉接到 Four Phase Training Pipeline...")
     logger.warning("=" * 70)
 
     results = run_four_phase_pipeline(
@@ -239,7 +239,7 @@ def main():
     )
 
     logger.info("\n" + "=" * 70)
-    logger.info("🎉 訓練完成！（透過 Four Phase Pipeline）")
+    logger.info(" 訓練完成！（透過 Four Phase Pipeline）")
     logger.info("=" * 70)
     if results:
         logger.info(f"Champion Strategy: {results.get('champion_strategy', 'N/A')}")

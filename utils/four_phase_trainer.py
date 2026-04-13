@@ -286,19 +286,19 @@ class ThresholdPolicyResult:
     lower_threshold: float
     upper_threshold: float
     
-    # 高通過機率區（prob >= upper_threshold → 建議自動核准）
+    # 高通過機率區（prob >= upper_threshold -> 建議自動核准）
     high_zone_count: int = 0
     high_zone_ratio: float = 0.0
     high_zone_avg_prob: float = 0.0
     high_zone_actual_approve_rate: float = 0.0
     
-    # 人工審核區（lower <= prob < upper → 需人工審查）
+    # 人工審核區（lower <= prob < upper -> 需人工審查）
     review_zone_count: int = 0
     review_zone_ratio: float = 0.0
     review_zone_avg_prob: float = 0.0
     review_zone_actual_approve_rate: float = 0.0
     
-    # 低通過機率區（prob < lower_threshold → 建議自動婉拒）
+    # 低通過機率區（prob < lower_threshold -> 建議自動婉拒）
     low_zone_count: int = 0
     low_zone_ratio: float = 0.0
     low_zone_avg_prob: float = 0.0
@@ -375,9 +375,9 @@ class DiagnosticsSummary:
         計算各階段差距
         
         判斷面向：
-        1. AUC gap → 典型 overfitting（Train >> Monitor/Holdout）
-        2. Brier gap → Calibration 偏移（Train Brier << Monitor Brier）
-        3. F1_reject → 少數類辨識力不足
+        1. AUC gap -> 典型 overfitting（Train >> Monitor/Holdout）
+        2. Brier gap -> Calibration 偏移（Train Brier << Monitor Brier）
+        3. F1_reject -> 少數類辨識力不足
         """
         self.gap_train_vs_monitor_auc = self.train_auc - self.avg_monitor_auc
         self.gap_train_vs_holdout_auc = self.train_auc - self.final_holdout_auc
@@ -410,7 +410,7 @@ class DiagnosticsSummary:
             self.has_calibration_issue = bool(brier_ratio > 2.0)
         
         # 判斷 Reject detection 問題
-        # F1_reject < 0.35 且 holdout F1_reject < 0.45 → 模型幾乎無法辨識 reject
+        # F1_reject < 0.35 且 holdout F1_reject < 0.45 -> 模型幾乎無法辨識 reject
         if self.final_holdout_f1_reject > 0:
             self.has_reject_detection_issue = bool(self.final_holdout_f1_reject < 0.45)
         
@@ -502,8 +502,8 @@ class ImbalanceHandler:
         """
         對訓練資料進行 resampling
         
-        ⚠️ 只能在 training folds 內使用！
-        ⚠️ Monitor / Validation / Production data 必須保留原始分布！
+        WARNING: 只能在 training folds 內使用！
+        WARNING: Monitor / Validation / Production data 必須保留原始分布！
         """
         if self.strategy == "smote":
             try:
@@ -610,16 +610,16 @@ class CandidateModels:
     
     設計原則（針對 ~95% 正樣本的高度不平衡資料）：
     - 偏向 conservative / 強正則化，避免模型把所有案件都預測為正類
-    - XGBoost: 淺樹 + 高正則化 + 低學習率 → 防止過度擬合多數類
-    - Random Forest: 限制深度 + 增加葉節點最小樣本 → 提升泛化
-    - Logistic Regression: 適當正則化 → 作為 baseline
+    - XGBoost: 淺樹 + 高正則化 + 低學習率 -> 防止過度擬合多數類
+    - Random Forest: 限制深度 + 增加葉節點最小樣本 -> 提升泛化
+    - Logistic Regression: 適當正則化 -> 作為 baseline
     """
     
     @staticmethod
     def get_logistic_regression(class_weight: Dict = None) -> LogisticRegression:
         return LogisticRegression(
             penalty='l2',
-            C=0.5,               # ← 加強正則化（原 1.0），避免對多數類過度自信
+            C=0.5,               # <- 加強正則化（原 1.0），避免對多數類過度自信
             class_weight=class_weight or 'balanced',
             solver='lbfgs',
             max_iter=1000,
@@ -630,11 +630,11 @@ class CandidateModels:
     @staticmethod
     def get_random_forest(class_weight: Dict = None) -> RandomForestClassifier:
         return RandomForestClassifier(
-            n_estimators=300,     # ← 增加樹數量（原 200），降低 variance
-            max_depth=6,          # ← 降低深度（原 10），防止過度擬合少數類的雜訊
-            min_samples_split=50, # ← 提高（原 20），節點切分需更多樣本
-            min_samples_leaf=20,  # ← 提高（原 10），葉節點至少 20 筆
-            max_features='sqrt',  # ← 限制每棵樹可用特徵數
+            n_estimators=300,     # <- 增加樹數量（原 200），降低 variance
+            max_depth=6,          # <- 降低深度（原 10），防止過度擬合少數類的雜訊
+            min_samples_split=50, # <- 提高（原 20），節點切分需更多樣本
+            min_samples_leaf=20,  # <- 提高（原 10），葉節點至少 20 筆
+            max_features='sqrt',  # <- 限制每棵樹可用特徵數
             class_weight=class_weight or 'balanced',
             random_state=RANDOM_STATE,
             n_jobs=-1
@@ -649,16 +649,16 @@ class CandidateModels:
         early stopping 改由呼叫端在 fit() 時手動設定（見 _train_window / _run_time_based_cv）。
         """
         return xgb.XGBClassifier(
-            n_estimators=300,         # ← 增加（原 200），搭配更低的 learning_rate
-            max_depth=3,              # ← 降低（原 5），淺樹 = 更強泛化
-            learning_rate=0.03,       # ← 降低（原 0.05），學得更慢更穩
-            min_child_weight=20,      # ← 提高（原 5），每個葉節點需更多樣本
-            subsample=0.7,            # ← 降低（原 0.8），增加隨機性
-            colsample_bytree=0.7,     # ← 降低（原 0.8），增加特徵隨機性
-            reg_alpha=1.0,            # ← 提高（原 0.1），L1 正則化
-            reg_lambda=5.0,           # ← 提高（原 1.0），L2 正則化
-            gamma=1.0,                # ← 新增，節點切分最小 gain 門檻
-            max_delta_step=1,         # ← 新增，限制葉節點權重變化（對 imbalance 有幫助）
+            n_estimators=300,         # <- 增加（原 200），搭配更低的 learning_rate
+            max_depth=3,              # <- 降低（原 5），淺樹 = 更強泛化
+            learning_rate=0.03,       # <- 降低（原 0.05），學得更慢更穩
+            min_child_weight=20,      # <- 提高（原 5），每個葉節點需更多樣本
+            subsample=0.7,            # <- 降低（原 0.8），增加隨機性
+            colsample_bytree=0.7,     # <- 降低（原 0.8），增加特徵隨機性
+            reg_alpha=1.0,            # <- 提高（原 0.1），L1 正則化
+            reg_lambda=5.0,           # <- 提高（原 1.0），L2 正則化
+            gamma=1.0,                # <- 新增，節點切分最小 gain 門檻
+            max_delta_step=1,         # <- 新增，限制葉節點權重變化（對 imbalance 有幫助）
             scale_pos_weight=scale_pos_weight,
             objective='binary:logistic',
             eval_metric='auc',
@@ -1152,7 +1152,7 @@ class FourPhaseTrainer:
         # Diagnostics
         self.diagnostics: Optional[DiagnosticsSummary] = None
         
-        # Selected threshold (Phase 3 推薦 → Phase 4 / Monitoring 使用)
+        # Selected threshold (Phase 3 推薦 -> Phase 4 / Monitoring 使用)
         self.selected_lower_threshold: Optional[float] = None
         self.selected_upper_threshold: Optional[float] = None
         
@@ -1197,11 +1197,11 @@ class FourPhaseTrainer:
             dfs.append(df_dev)
             logger.info(f"  Development: {len(df_dev)} 筆")
         
-        # OOT (Gold Layer legacy storage name → 後續拆為 policy_validation + final_holdout)
+        # OOT (Gold Layer legacy storage name -> 後續拆為 policy_validation + final_holdout)
         if self.oot_path.exists():
             df_oot = spark.read.parquet(str(self.oot_path)).toPandas()
             dfs.append(df_oot)
-            logger.info(f"  OOT (legacy storage): {len(df_oot)} 筆 → 後續拆為 policy_validation + final_holdout")
+            logger.info(f"  OOT (legacy storage): {len(df_oot)} 筆 -> 後續拆為 policy_validation + final_holdout")
         
         if not dfs:
             raise ValueError("找不到任何資料！")
@@ -1639,7 +1639,7 @@ class FourPhaseTrainer:
         
         logger.info("\n策略排名:")
         for i, (name, strategy) in enumerate(sorted_strategies):
-            marker = " ← Champion" if i == 0 else ""
+            marker = " <- Champion" if i == 0 else ""
             logger.info(f"  {i+1}. {name}: Score={strategy.overall_score:.4f} "
                         f"(f1_rej={strategy.avg_monitor_f1_reject:.4f}, "
                         f"ks={strategy.avg_monitor_ks:.4f}, "
@@ -1735,7 +1735,7 @@ class FourPhaseTrainer:
                                 f"holdout_f1_reject={record['holdout_f1_reject']:.4f}, "
                                 f"holdout_brier={record['holdout_brier']:.4f}")
                 except Exception as e:
-                    logger.warning(f"    ⚠️ {label} 失敗: {e}")
+                    logger.warning(f"    WARNING: {label} 失敗: {e}")
         
         # ── Random Forest 候選 ──
         for rf_cfg in tuning_cfg.rf_candidates:
@@ -1765,7 +1765,7 @@ class FourPhaseTrainer:
                                 f"holdout_f1_reject={record['holdout_f1_reject']:.4f}, "
                                 f"holdout_brier={record['holdout_brier']:.4f}")
                 except Exception as e:
-                    logger.warning(f"    ⚠️ {label} 失敗: {e}")
+                    logger.warning(f"    WARNING: {label} 失敗: {e}")
         
         if not tuning_records:
             logger.warning("所有 tuning 候選皆失敗，保持原 champion")
@@ -1775,7 +1775,7 @@ class FourPhaseTrainer:
         tw = tuning_cfg.tuning_weights
         
         for rec in tuning_records:
-            # Brier 越低越好 → 取反 (1 - brier) 作為分數
+            # Brier 越低越好 -> 取反 (1 - brier) 作為分數
             score = (
                 tw.get("w_holdout_f1_reject", 0.25) * rec["holdout_f1_reject"] +
                 tw.get("w_monitor_f1_reject", 0.15) * rec["avg_monitor_f1_reject"] +
@@ -1794,7 +1794,7 @@ class FourPhaseTrainer:
         logger.info("Conservative Tuning 結果排名")
         logger.info("=" * 60)
         for i, rec in enumerate(tuning_records):
-            marker = " ← BEST" if i == 0 else ""
+            marker = " <- BEST" if i == 0 else ""
             logger.info(
                 f"  {i+1}. {rec['model_name']}/{rec['config_id']}/"
                 f"{rec['calibration_method']} "
@@ -1808,7 +1808,7 @@ class FourPhaseTrainer:
         
         best = tuning_records[0]
         
-        logger.info(f"\n✓ Tuning Champion: {best['model_name']} / {best['config_id']} / {best['calibration_method']}")
+        logger.info(f"\nOK: Tuning Champion: {best['model_name']} / {best['config_id']} / {best['calibration_method']}")
         logger.info(f"  Why: tuning_score={best['tuning_score']:.4f}")
         logger.info(f"    holdout_f1_reject={best['holdout_f1_reject']:.4f}")
         logger.info(f"    holdout_brier={best['holdout_brier']:.4f}")
@@ -1816,7 +1816,7 @@ class FourPhaseTrainer:
         logger.info(f"    avg_monitor_f1_reject={best['avg_monitor_f1_reject']:.4f}")
         logger.info(f"    stability_score={best['stability_score']:.4f}")
         
-        # ★ 更新 champion_strategy 和 tuning state
+        # NOTE: 更新 champion_strategy 和 tuning state
         self.champion_strategy = best["model_name"]
         self.tuning_results = tuning_records
         self.tuning_best = best
@@ -1996,7 +1996,7 @@ class FourPhaseTrainer:
         Phase 2: Champion Retraining
         
         使用完整 18 個月 development dataset
-        用選出的 Champion Strategy 重訓 → 產出 Final Champion Artifact
+        用選出的 Champion Strategy 重訓 -> 產出 Final Champion Artifact
         
         此 Final Champion Artifact 才是後續要用的模型：
         - Phase 3 Policy Validation（threshold / zone policy tuning）
@@ -2030,7 +2030,7 @@ class FourPhaseTrainer:
         tuning_best = getattr(self, 'tuning_best', None)
         
         if tuning_best is not None:
-            # ★ 使用 tuning 選出的最佳參數
+            # NOTE: 使用 tuning 選出的最佳參數
             logger.info(f"  使用 Tuning Best Config: {tuning_best['config_id']}")
             best_params = tuning_best.get("params", {})
             calibration_method = tuning_best.get("calibration_method", calibration_method)
@@ -2091,7 +2091,7 @@ class FourPhaseTrainer:
             base_model.fit(X, y)
             self.final_champion_model = base_model
         
-        logger.info("✓ Final Champion Model 訓練完成")
+        logger.info("OK: Final Champion Model 訓練完成")
         
         # In-sample 評估
         y_pred_proba = self.final_champion_model.predict_proba(X)[:, 1]
@@ -2159,7 +2159,7 @@ class FourPhaseTrainer:
         
         # 載入 Policy Validation 資料
         if policy_val_df is None:
-            # 從 OOT (Gold Layer legacy storage) 切分：前 2/3 → policy_validation，後 1/3 → final_holdout
+            # 從 OOT (Gold Layer legacy storage) 切分：前 2/3 -> policy_validation，後 1/3 -> final_holdout
             spark = self._get_spark()
             oot_df = spark.read.parquet(str(self.oot_path)).toPandas()
             oot_df['進件日'] = pd.to_datetime(oot_df['進件日'])
@@ -2230,11 +2230,11 @@ class FourPhaseTrainer:
         if passing_results:
             best = passing_results[0]  # score_threshold_policy 已排序
             
-            # ★ 保存推薦 threshold 到 class attribute，供 Phase 4 / Monitoring 使用
+            # NOTE: 保存推薦 threshold 到 class attribute，供 Phase 4 / Monitoring 使用
             self.selected_lower_threshold = best.lower_threshold
             self.selected_upper_threshold = best.upper_threshold
             
-            logger.info(f"\n✓ Phase 3 推薦 Threshold（已保存至 trainer state）:")
+            logger.info(f"\nOK: Phase 3 推薦 Threshold（已保存至 trainer state）:")
             logger.info(f"  Lower: {self.selected_lower_threshold}")
             logger.info(f"  Upper: {self.selected_upper_threshold}")
             logger.info(f"  Threshold Score: {best.threshold_score:.4f}")
@@ -2249,13 +2249,13 @@ class FourPhaseTrainer:
             logger.info(f"\n  Top-3 候選:")
             for i, r in enumerate(passing_results[:3]):
                 logger.info(f"    {i+1}. lower={r.lower_threshold}, upper={r.upper_threshold} "
-                            f"→ score={r.threshold_score:.4f}, "
+                            f"-> score={r.threshold_score:.4f}, "
                             f"auto={r.auto_decision_rate:.2%}, "
                             f"manual={r.manual_review_load:.2%}, "
                             f"high_prec={r.expected_precision_high:.2%}")
         else:
             # Fallback: 放寬約束，從所有結果中選 score 最高的
-            logger.warning("⚠️ 無組合通過 hard constraints，放寬至所有結果中選最佳")
+            logger.warning("WARNING: 無組合通過 hard constraints，放寬至所有結果中選最佳")
             if scored_results:
                 best = scored_results[0]
                 self.selected_lower_threshold = best.lower_threshold
@@ -2263,14 +2263,14 @@ class FourPhaseTrainer:
                 logger.warning(f"  Fallback 選擇: lower={best.lower_threshold}, upper={best.upper_threshold}")
                 logger.warning(f"  Violations: {best.constraint_violations}")
             else:
-                logger.warning("⚠️ Phase 3 無法找到任何 threshold 組合，將使用預設值")
+                logger.warning("WARNING: Phase 3 無法找到任何 threshold 組合，將使用預設值")
         
         # 建立 predictions DataFrame
         predictions_df = policy_val_df[['案件編號', '進件日', '授信結果_二元']].copy()
         predictions_df['pred_prob'] = y_pred_proba
         predictions_df['actual_label'] = y
         
-        # ★ Phase 3 也輸出 zone assignment（使用推薦 threshold 或 fallback）
+        # NOTE: Phase 3 也輸出 zone assignment（使用推薦 threshold 或 fallback）
         pv_lower = self.selected_lower_threshold if self.selected_lower_threshold is not None else 0.5
         pv_upper = self.selected_upper_threshold if self.selected_upper_threshold is not None else 0.85
         predictions_df['pred_zone'] = assign_score_zone(y_pred_proba, pv_lower, pv_upper)
@@ -2302,13 +2302,13 @@ class FourPhaseTrainer:
         1. Phase 3 推薦值 (self.selected_lower/upper_threshold)
         2. 函式參數 (lower_threshold / upper_threshold)
         
-        ⚠️ 這是有真實 label 的 Final Blind Holdout evaluation
-        ⚠️ 不是 Production Batch Scoring（production 沒有即時 label，只輸出 predictions）
+        WARNING: 這是有真實 label 的 Final Blind Holdout evaluation
+        WARNING: 不是 Production Batch Scoring（production 沒有即時 label，只輸出 predictions）
         """
         if self.final_champion_model is None:
             raise ValueError("請先執行 Phase 2 Champion Retraining")
         
-        # ★ 優先使用 Phase 3 推薦的 threshold
+        # NOTE: 優先使用 Phase 3 推薦的 threshold
         if self.selected_lower_threshold is not None:
             lower_threshold = self.selected_lower_threshold
         if self.selected_upper_threshold is not None:
@@ -2318,9 +2318,9 @@ class FourPhaseTrainer:
         logger.info("Phase 4: Final Blind Holdout Evaluation")
         logger.info("=" * 80)
         if self.selected_lower_threshold is not None:
-            logger.info(f"★ 使用 Phase 3 推薦 Threshold: lower={lower_threshold}, upper={upper_threshold}")
+            logger.info(f"NOTE: 使用 Phase 3 推薦 Threshold: lower={lower_threshold}, upper={upper_threshold}")
         else:
-            logger.info(f"⚠️ 未找到 Phase 3 推薦 Threshold，使用預設值: lower={lower_threshold}, upper={upper_threshold}")
+            logger.info(f"WARNING: 未找到 Phase 3 推薦 Threshold，使用預設值: lower={lower_threshold}, upper={upper_threshold}")
         logger.info("注意：此階段完全不調模型、不調 threshold")
         logger.info("這是最終的 untouched Final Blind Holdout（有真實 label，可算指標）")
         
@@ -2476,7 +2476,7 @@ class FourPhaseTrainer:
         if rolling_records:
             rolling_df = pd.DataFrame(rolling_records)
             rolling_df.to_csv(output_dir / "rolling_results.csv", index=False, encoding='utf-8-sig')
-            logger.info("  ✓ rolling_results.csv")
+            logger.info("  OK: rolling_results.csv")
         
         # 2. champion_summary.json
         cs_cfg = self.config.champion_selection if hasattr(self.config, 'champion_selection') else ChampionSelectionConfig()
@@ -2509,7 +2509,7 @@ class FourPhaseTrainer:
             }
         }
         
-        # ★ 如果有 tuning 結果，加入 tuning metadata
+        # NOTE: 如果有 tuning 結果，加入 tuning metadata
         tuning_best = getattr(self, 'tuning_best', None)
         if tuning_best is not None:
             champion_data["tuning_config"] = {
@@ -2530,7 +2530,7 @@ class FourPhaseTrainer:
         
         with open(output_dir / "champion_summary.json", 'w', encoding='utf-8') as f:
             json.dump(champion_data, f, ensure_ascii=False, indent=2)
-        logger.info("  ✓ champion_summary.json")
+        logger.info("  OK: champion_summary.json")
         
         # 2b. tuning_comparison.csv
         tuning_results = getattr(self, 'tuning_results', None)
@@ -2562,7 +2562,7 @@ class FourPhaseTrainer:
                 output_dir / "tuning_comparison.csv",
                 index=False, encoding='utf-8-sig'
             )
-            logger.info("  ✓ tuning_comparison.csv")
+            logger.info("  OK: tuning_comparison.csv")
         
         # 3. policy_validation_predictions.csv
         if policy_predictions_df is not None:
@@ -2570,7 +2570,7 @@ class FourPhaseTrainer:
                 output_dir / "policy_validation_predictions.csv",
                 index=False, encoding='utf-8-sig'
             )
-            logger.info("  ✓ policy_validation_predictions.csv")
+            logger.info("  OK: policy_validation_predictions.csv")
         
         # 4. threshold_policy_comparison.csv
         if threshold_results is not None:
@@ -2579,7 +2579,7 @@ class FourPhaseTrainer:
                 output_dir / "threshold_policy_comparison.csv",
                 index=False, encoding='utf-8-sig'
             )
-            logger.info("  ✓ threshold_policy_comparison.csv")
+            logger.info("  OK: threshold_policy_comparison.csv")
         
         # 5. final_holdout_predictions.csv
         if holdout_predictions_df is not None:
@@ -2587,7 +2587,7 @@ class FourPhaseTrainer:
                 output_dir / "final_holdout_predictions.csv",
                 index=False, encoding='utf-8-sig'
             )
-            logger.info("  ✓ final_holdout_predictions.csv")
+            logger.info("  OK: final_holdout_predictions.csv")
         
         # 6. final_holdout_metrics.json
         if holdout_metrics is not None:
@@ -2601,31 +2601,31 @@ class FourPhaseTrainer:
             }
             with open(output_dir / "final_holdout_metrics.json", 'w', encoding='utf-8') as f:
                 json.dump(holdout_metrics_with_meta, f, ensure_ascii=False, indent=2)
-            logger.info("  ✓ final_holdout_metrics.json")
+            logger.info("  OK: final_holdout_metrics.json")
         
         # 7. zone_summary.csv
         if zone_summaries is not None:
             zone_df = pd.DataFrame([z.to_dict() for z in zone_summaries])
             zone_df.to_csv(output_dir / "zone_summary.csv", index=False, encoding='utf-8-sig')
-            logger.info("  ✓ zone_summary.csv")
+            logger.info("  OK: zone_summary.csv")
         
         # 8. diagnostics_summary.json
         if self.diagnostics is not None:
             with open(output_dir / "diagnostics_summary.json", 'w', encoding='utf-8') as f:
                 json.dump(self.diagnostics.to_dict(), f, ensure_ascii=False, indent=2)
-            logger.info("  ✓ diagnostics_summary.json")
+            logger.info("  OK: diagnostics_summary.json")
         
         # 9. 儲存模型
         if self.final_champion_model is not None:
             model_path = output_dir / "final_champion_model.pkl"
             with open(model_path, 'wb') as f:
                 pickle.dump(self.final_champion_model, f)
-            logger.info("  ✓ final_champion_model.pkl")
+            logger.info("  OK: final_champion_model.pkl")
         
         # 10. feature_names.json
         with open(output_dir / "feature_names.json", 'w', encoding='utf-8') as f:
             json.dump(self.feature_names, f, ensure_ascii=False, indent=2)
-        logger.info("  ✓ feature_names.json")
+        logger.info("  OK: feature_names.json")
         
         # 11. zone_policy_summary.json
         if threshold_results is not None:
@@ -2662,7 +2662,7 @@ class FourPhaseTrainer:
                 
                 with open(output_dir / "zone_policy_summary.json", 'w', encoding='utf-8') as f:
                     json.dump(zone_policy, f, ensure_ascii=False, indent=2)
-                logger.info("  ✓ zone_policy_summary.json")
+                logger.info("  OK: zone_policy_summary.json")
         
         return output_dir
     
@@ -2693,7 +2693,7 @@ class FourPhaseTrainer:
             # Select Champion (Phase 1 結果)
             self.select_champion_strategy()
             
-            # ★ Conservative Fine-Tuning (Phase 1 → Phase 2 之間)
+            # NOTE: Conservative Fine-Tuning (Phase 1 -> Phase 2 之間)
             tuning_cfg = self.config.tuning if hasattr(self.config, 'tuning') else TuningConfig()
             if tuning_cfg.enable_tuning:
                 tuning_result = self.run_conservative_tuning(use_calibration=use_calibration)
@@ -2709,12 +2709,12 @@ class FourPhaseTrainer:
                 upper_thresholds=upper_thresholds
             )
             
-            # ★ Phase 3 之後，決定最終使用的 threshold
+            # NOTE: Phase 3 之後，決定最終使用的 threshold
             # 優先使用 Phase 3 推薦值；若無，fallback 到 CLI / default
             effective_lower = self.selected_lower_threshold or lower_threshold
             effective_upper = self.selected_upper_threshold or upper_threshold
             
-            logger.info(f"\n★ 最終使用 Threshold: lower={effective_lower}, upper={effective_upper}")
+            logger.info(f"\nNOTE: 最終使用 Threshold: lower={effective_lower}, upper={effective_upper}")
             if self.selected_lower_threshold is not None:
                 logger.info(f"  來源: Phase 3 Policy Validation 推薦")
             else:
@@ -2743,7 +2743,7 @@ class FourPhaseTrainer:
             )
             
             logger.info("\n" + "=" * 80)
-            logger.info("🎉 四階段 Pipeline 完成！")
+            logger.info(" 四階段 Pipeline 完成！")
             logger.info("=" * 80)
             
             return {

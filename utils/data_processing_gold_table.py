@@ -13,8 +13,8 @@ Gold Layer: 模型特徵準備與資料切分
 命名對齊說明（Four Phase Architecture）：
 - Gold 層產出 "development" 和 "oot" 兩個分區
 - "oot" 是 legacy 命名，在四階段架構中對應：
-    - 前 2/3 → policy_validation（Phase 3：threshold / zone policy tuning）
-    - 後 1/3 → final_holdout（Phase 4：untouched blind evaluation）
+    - 前 2/3 -> policy_validation（Phase 3：threshold / zone policy tuning）
+    - 後 1/3 -> final_holdout（Phase 4：untouched blind evaluation）
 - 真正的 phase 切分由 FourPhaseTrainer 在訓練時執行
 - Rolling windows 只針對 development period 產生
 
@@ -211,7 +211,7 @@ def apply_frequency_encoding(
     
     for col in columns:
         if col in df_dev.columns:
-            logger.info(f"✓ {col} 完成 Frequency Encoding")
+            logger.info(f"OK: {col} 完成 Frequency Encoding")
     
     return df_dev, df_oot, frequency_features
 
@@ -285,7 +285,7 @@ def create_cross_features(
         "教育_所得交互"
     ]
     
-    logger.info(f"✓ 新增交互特徵: {cross_features}")
+    logger.info(f"OK: 新增交互特徵: {cross_features}")
     logger.info("  - 負債月所得比：使用估計月所得中位數計算，確保財務意義")
     
     return df_dev, df_oot, cross_features
@@ -327,7 +327,7 @@ def apply_minmax_scaling(
     # 4. 取得 scaled 欄位名稱
     scaled_features = [f"{col}_scaled" for col in columns if col in df_dev.columns]
     
-    logger.info(f"✓ MinMaxScaler 完成，共 {len(scaled_features)} 個標準化特徵")
+    logger.info(f"OK: MinMaxScaler 完成，共 {len(scaled_features)} 個標準化特徵")
     return df_dev, df_oot, scaled_features, scaler_artifact
 
 
@@ -370,7 +370,7 @@ def prepare_final_features(
             if col in df_oot.columns:
                 df_oot = df_oot.withColumn(col, F.coalesce(F.col(col), F.lit(0.0)))
     else:
-        logger.info("✓ 所有特徵都沒有 NULL")
+        logger.info("OK: 所有特徵都沒有 NULL")
     
     # 選取最終欄位
     final_cols = key_cols + all_features + [target_col]
@@ -395,9 +395,9 @@ def save_gold_outputs(
     儲存 Gold Layer 輸出
     
     輸出結構：
-    - gold/development/  → Development period 資料（Phase 1 Rolling + Phase 2 Retraining 使用）
-    - gold/oot/          → Out-of-Time 資料（Phase 3 Policy Validation + Phase 4 Final Holdout 使用）
-    - gold/rolling_window_definition.csv → Rolling windows 定義（僅 development period）
+    - gold/development/  -> Development period 資料（Phase 1 Rolling + Phase 2 Retraining 使用）
+    - gold/oot/          -> Out-of-Time 資料（Phase 3 Policy Validation + Phase 4 Final Holdout 使用）
+    - gold/rolling_window_definition.csv -> Rolling windows 定義（僅 development period）
     
     注意："oot" 是 Gold 層的統一輸出命名。
     四階段架構中的 policy_validation / final_holdout 切分由 FourPhaseTrainer 在訓練時執行。
@@ -421,7 +421,7 @@ def save_gold_outputs(
     output_paths["development"] = gold_dev_path
     
     # 2. 儲存 OOT（按月份）— legacy storage name
-    logger.info("儲存 OOT (legacy storage name → FourPhaseTrainer 會拆為 policy_validation + final_holdout)...")
+    logger.info("儲存 OOT (legacy storage name -> FourPhaseTrainer 會拆為 policy_validation + final_holdout)...")
     df_oot_final.write.mode("overwrite").partitionBy("進件年月").parquet(str(gold_oot_path))
     output_paths["oot"] = gold_oot_path
     
@@ -659,7 +659,7 @@ def run_gold_pipeline(
             output_paths["artifacts"] = artifacts_path
             output_paths["artifact_files"] = artifact_paths
             
-            logger.info(f"✓ Artifacts 儲存至: {artifacts_path}")
+            logger.info(f"OK: Artifacts 儲存至: {artifacts_path}")
         
         # ============================================
         # 10. 資料漂移檢查

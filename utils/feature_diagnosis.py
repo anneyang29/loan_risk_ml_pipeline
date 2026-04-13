@@ -132,7 +132,7 @@ def compute_feature_importance(model, feature_names: List[str]) -> pd.DataFrame:
     # 取得內部 XGBoost 模型
     xgb_model = _extract_xgb_model(model)
 
-    # 建立 f{i} → feature_name 的映射
+    # 建立 f{i} -> feature_name 的映射
     fi_to_name = {f"f{i}": name for i, name in enumerate(feature_names)}
 
     importance_types = ["weight", "gain", "cover"]
@@ -185,8 +185,8 @@ def compute_reject_correlation(
 ) -> pd.DataFrame:
     """
     計算每個特徵與 reject class (label=0) 的相關性。
-    對 binary/ordinal → point-biserial correlation
-    對 continuous → Pearson correlation
+    對 binary/ordinal -> point-biserial correlation
+    對 continuous -> Pearson correlation
     """
     logger.info("=== Feature-Reject Correlation ===")
 
@@ -315,7 +315,7 @@ def compute_feature_stability(
     unstable_count = df_stability["is_unstable"].sum()
     logger.info(f"不穩定特徵數: {unstable_count} / {len(df_stability)}")
     for _, r in df_stability[df_stability["is_unstable"]].iterrows():
-        logger.info(f"  ⚠️ {r['feature']}: PSI={r['psi_dev_vs_oot']:.4f}, "
+        logger.info(f"  WARNING: {r['feature']}: PSI={r['psi_dev_vs_oot']:.4f}, "
                     f"shift={r['mean_shift_zscore']:.4f}, CV={r['temporal_cv']:.4f}")
 
     return df_stability, stability_detail
@@ -395,8 +395,8 @@ def run_error_analysis(
     total = len(merged)
     fp_count = merged["is_FP"].sum()
     fn_count = merged["is_FN"].sum()
-    logger.info(f"FP (高通過→實際婉拒): {fp_count} ({fp_count/total:.2%})")
-    logger.info(f"FN (低風險外→實際應核准): {fn_count} ({fn_count/total:.2%})")
+    logger.info(f"FP (高通過->實際婉拒): {fp_count} ({fp_count/total:.2%})")
+    logger.info(f"FN (低風險外->實際應核准): {fn_count} ({fn_count/total:.2%})")
 
     # 5a. Segment error analysis
     segment_analysis = _segment_error_analysis(merged, feature_names)
@@ -622,7 +622,7 @@ def generate_top_feature_report(diagnosis_df: pd.DataFrame, output_path: Path):
     ]
 
     for _, r in diagnosis_df.head(15).iterrows():
-        unstable_flag = "⚠️" if r.get("is_unstable") else "✅"
+        unstable_flag = "WARNING:" if r.get("is_unstable") else "OK"
         lines.append(
             f"| {int(r['rank_gain'])} | {r['feature']} | "
             f"{r['importance_gain_norm']:.4f} | "
@@ -670,7 +670,7 @@ def generate_top_feature_report(diagnosis_df: pd.DataFrame, output_path: Path):
         "",
         "## 4. Feature Shift in Error Cases",
         "",
-        "### FP cases (高通過→實際婉拒) — 特徵偏移最大的",
+        "### FP cases (高通過->實際婉拒) — 特徵偏移最大的",
         "",
         "| Feature | FP Shift (z) | FN Shift (z) | Category |",
         "|---------|--------------|--------------|----------|",
@@ -691,7 +691,7 @@ def generate_top_feature_report(diagnosis_df: pd.DataFrame, output_path: Path):
     with open(output_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
 
-    logger.info(f"✓ 報告已產出: {output_path}")
+    logger.info(f"OK: 報告已產出: {output_path}")
 
 
 # ============================================
@@ -887,7 +887,7 @@ def generate_improvement_hypotheses(
     with open(output_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
 
-    logger.info(f"✓ 改善假設已產出: {output_path}")
+    logger.info(f"OK: 改善假設已產出: {output_path}")
 
 
 # ============================================
@@ -996,7 +996,7 @@ def generate_challenger_plan(
     plan_path = output_dir / "challenger_plan.json"
     with open(plan_path, "w", encoding="utf-8") as f:
         json.dump(plan, f, ensure_ascii=False, indent=2)
-    logger.info(f"✓ Challenger plan: {plan_path}")
+    logger.info(f"OK: Challenger plan: {plan_path}")
 
     # Save experiment matrix
     matrix_records = []
@@ -1016,7 +1016,7 @@ def generate_challenger_plan(
     matrix_df = pd.DataFrame(matrix_records)
     matrix_path = output_dir / "challenger_experiment_matrix.csv"
     matrix_df.to_csv(matrix_path, index=False, encoding="utf-8-sig")
-    logger.info(f"✓ Experiment matrix: {matrix_path}")
+    logger.info(f"OK: Experiment matrix: {matrix_path}")
 
 
 # ============================================
@@ -1089,7 +1089,7 @@ def run_full_diagnosis(output_dir: Path = None) -> Dict[str, Any]:
 
     # 1. feature_diagnosis.csv
     diagnosis_df.to_csv(output_dir / "feature_diagnosis.csv", index=False, encoding="utf-8-sig")
-    logger.info("  ✓ feature_diagnosis.csv")
+    logger.info("  OK: feature_diagnosis.csv")
 
     # 2. feature_stability_summary.json
     stability_summary = {
@@ -1102,30 +1102,30 @@ def run_full_diagnosis(output_dir: Path = None) -> Dict[str, Any]:
     }
     with open(output_dir / "feature_stability_summary.json", "w", encoding="utf-8") as f:
         json.dump(stability_summary, f, ensure_ascii=False, indent=2)
-    logger.info("  ✓ feature_stability_summary.json")
+    logger.info("  OK: feature_stability_summary.json")
 
     # 3. error_analysis_by_segment.csv
     segment_analysis.to_csv(
         output_dir / "error_analysis_by_segment.csv", index=False, encoding="utf-8-sig"
     )
-    logger.info("  ✓ error_analysis_by_segment.csv")
+    logger.info("  OK: error_analysis_by_segment.csv")
 
     # 4. false_positive_profile.csv
     fp_profile.to_csv(
         output_dir / "false_positive_profile.csv", index=False, encoding="utf-8-sig"
     )
-    logger.info("  ✓ false_positive_profile.csv")
+    logger.info("  OK: false_positive_profile.csv")
 
     # 5. false_negative_profile.csv
     fn_profile.to_csv(
         output_dir / "false_negative_profile.csv", index=False, encoding="utf-8-sig"
     )
-    logger.info("  ✓ false_negative_profile.csv")
+    logger.info("  OK: false_negative_profile.csv")
 
     # 6. zone_error_summary.json
     with open(output_dir / "zone_error_summary.json", "w", encoding="utf-8") as f:
         json.dump(zone_summary, f, ensure_ascii=False, indent=2)
-    logger.info("  ✓ zone_error_summary.json")
+    logger.info("  OK: zone_error_summary.json")
 
     # 7. top_feature_report.md
     generate_top_feature_report(diagnosis_df, output_dir / "top_feature_report.md")
@@ -1140,7 +1140,7 @@ def run_full_diagnosis(output_dir: Path = None) -> Dict[str, Any]:
     generate_challenger_plan(diagnosis_df, output_dir)
 
     logger.info("=" * 60)
-    logger.info(f"✓ 診斷完成。所有輸出在: {output_dir}")
+    logger.info(f"OK: 診斷完成。所有輸出在: {output_dir}")
     logger.info("=" * 60)
 
     return {

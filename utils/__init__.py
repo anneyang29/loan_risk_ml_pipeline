@@ -144,9 +144,9 @@ from .baseline_manager import (
 
 # ──────────────────────────────────────────
 # Legacy: Rolling Trainer（已由 FourPhaseTrainer 取代）
-# ⚠️ 不建議新開發直接 import 這些模組
-# ⚠️ 僅保留供 notebook / 分析腳本 / CI 向後相容
-# ⚠️ 主流程請使用上方 Primary 區塊的模組
+# WARNING: 不建議新開發直接 import 這些模組
+# WARNING: 僅保留供 notebook / 分析腳本 / CI 向後相容
+# WARNING: 主流程請使用上方 Primary 區塊的模組
 # ──────────────────────────────────────────
 from .rolling_trainer import (
     RollingTrainer,

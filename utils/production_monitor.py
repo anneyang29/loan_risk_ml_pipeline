@@ -16,8 +16,8 @@ Production Monitoring Module v2
 
 3. Production Batch Scoring
    - score_production_batch(): 只輸出預測，不算指標（因為沒有 label）
-   - ⚠️ 這不是 Final Blind Holdout（Phase 4 有 label 可算指標）
-   - ⚠️ Production Batch Scoring 沒有 ground truth，只輸出 probability + zone
+   - WARNING: 這不是 Final Blind Holdout（Phase 4 有 label 可算指標）
+   - WARNING: Production Batch Scoring 沒有 ground truth，只輸出 probability + zone
 
 4. Dynamic Data Window for Retraining
    - 以當前日期往前推 18 個月作為 development
@@ -306,7 +306,7 @@ def score_production_batch(
     - 只輸出 prediction probability、zone、timestamp、model_version
     - 不算 AUC / F1（因為沒有 ground truth）
     
-    ⚠️ 與 Final Blind Holdout (Phase 4) 的區別：
+    WARNING: 與 Final Blind Holdout (Phase 4) 的區別：
     - Phase 4 有真實 label，可算 AUC / F1 / KS
     - Production Batch Scoring 沒有 label，僅做推論
     
@@ -469,8 +469,8 @@ class ProductionMonitor:
         lower = lower_threshold or self.config.default_lower_threshold
         upper = upper_threshold or self.config.default_upper_threshold
         
-        # ★ 明確 log monitoring 使用的 threshold
-        logger.info(f"\n★ Production Monitoring Threshold:")
+        # NOTE: 明確 log monitoring 使用的 threshold
+        logger.info(f"\nNOTE: Production Monitoring Threshold:")
         logger.info(f"  Lower: {lower}")
         logger.info(f"  Upper: {upper}")
         if lower_threshold is not None:
@@ -676,15 +676,15 @@ class ProductionMonitor:
         if result.warnings:
             logger.warning(f"\nWarnings:")
             for w in result.warnings:
-                logger.warning(f"  ⚠️ {w}")
+                logger.warning(f"  WARNING: {w}")
         
         if result.alerts:
             logger.error(f"\nAlerts:")
             for a in result.alerts:
-                logger.error(f"  🚨 {a}")
+                logger.error(f"  ALERT: {a}")
         
         if result.needs_retraining:
-            logger.warning(f"\n🔄 RETRAINING TRIGGERED: {result.retraining_trigger_reason}")
+            logger.warning(f"\n[RETRAIN] RETRAINING TRIGGERED: {result.retraining_trigger_reason}")
         
         logger.info("=" * 60)
     

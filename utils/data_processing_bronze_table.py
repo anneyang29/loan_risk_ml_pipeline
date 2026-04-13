@@ -123,5 +123,5 @@ if __name__ == "__main__":
     output_path = run_bronze_pipeline(project_root)
     
     logger.info("=" * 60)
-    logger.info(f"✓ Bronze Layer 完成！輸出: {output_path}")
+    logger.info(f"OK: Bronze Layer 完成！輸出: {output_path}")
     logger.info("=" * 60)

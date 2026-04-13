@@ -202,7 +202,7 @@ class ModelRegistry:
         self.records[model_version] = record
         self._save_registry()
         
-        logger.info(f"✓ 模型已註冊: {model_version}")
+        logger.info(f"OK: 模型已註冊: {model_version}")
         logger.info(f"  AUC Test: {record.auc_test:.4f}, GINI Test: {record.gini_test:.4f}")
         
         return record
@@ -246,7 +246,7 @@ class ModelRegistry:
             f.write(model_version)
         
         self._save_registry()
-        logger.info(f"✓ 最佳模型已設定: {model_version}")
+        logger.info(f"OK: 最佳模型已設定: {model_version}")
     
     def set_production_model(self, model_version: str):
         """設定 production 模型"""
@@ -259,7 +259,7 @@ class ModelRegistry:
         
         self.records[model_version].is_production = True
         self._save_registry()
-        logger.info(f"✓ Production 模型已設定: {model_version}")
+        logger.info(f"OK: Production 模型已設定: {model_version}")
     
     def auto_select_best(self, metric: str = "auc_test") -> str:
         """
@@ -318,8 +318,8 @@ class ModelRegistry:
             r = self.records[version]
             auc_oot_str = f"{r.auc_oot:.4f}" if r.auc_oot else "N/A"
             ks_str = f"{r.ks_test:.4f}" if r.ks_test else "N/A"
-            best_str = "✓" if r.is_best else ""
-            prod_str = "✓" if r.is_production else ""
+            best_str = "OK:" if r.is_best else ""
+            prod_str = "OK:" if r.is_production else ""
             
             lines.append(
                 f"{version:<30} {r.auc_test:>10.4f} {r.gini_test:>10.4f} {auc_oot_str:>10} {ks_str:>8} {best_str:>6} {prod_str:>6}"
@@ -481,7 +481,7 @@ class ExtendedModelRegistry(ModelRegistry):
         self.records[model_version] = record
         self._save_registry()
         
-        logger.info(f"✓ Rolling Training 模型已註冊: {model_version}")
+        logger.info(f"OK: Rolling Training 模型已註冊: {model_version}")
         logger.info(f"  Champion Strategy: {champion_strategy}")
         logger.info(f"  Rolling Cycles: {record.rolling_cycles_count}")
         logger.info(f"  Overall Score: {record.overall_score:.4f}")
