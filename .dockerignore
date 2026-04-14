@@ -1,0 +1,89 @@
+# ============================================================
+# .dockerignore — Loan Risk ML Pipeline
+# ============================================================
+# Keep the build context small and avoid baking sensitive /
+# large generated files into the image.
+# Rules mirror .gitignore but are independent — Docker's
+# build context is what matters here.
+# ============================================================
+
+# ── Python bytecode ──────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+
+# ── Virtual environments ──────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+.conda/
+conda-env/
+
+# ── IDE / editor ──────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ── Jupyter ───────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb_checkpoints/
+*.ipynb
+
+# ── Data files — mount at runtime via -v, do not bake in ─────
+data/
+datamart/
+
+# ── Trained model artefacts — mount at runtime via -v ────────
+model_bank/
+
+# ── Spark scratch ─────────────────────────────────────────────
+spark-warehouse/
+metastore_db/
+derby.log
+*.crc
+
+# ── Logs & reports ────────────────────────────────────────────
+*.log
+logs/
+reports/
+
+# ── Secrets & credentials ─────────────────────────────────────
+.env
+.env.*
+*.pem
+*.key
+secrets/
+credentials/
+config/local.yaml
+config/prod.yaml
+
+# ── OS files ──────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Test / CI artefacts ───────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# ── Misc ──────────────────────────────────────────────────────
+*.bak
+*.tmp
+*.temp
+.cache/
+docker-data/
+
+# ── Git ───────────────────────────────────────────────────────
+.git/
+.gitignore
+
+# ── Backup folder (large old run artefacts) ──────────────────
+backup/

@@ -55,11 +55,12 @@ conda-env/
 .ipynb_checkpoints/
 *.ipynb_checkpoints/
 
-# 所有 notebook 檔案不進版控
-*.ipynb
+# Notebook output files (keep .ipynb source if desired;
+# uncomment below to exclude notebooks entirely)
+# *.ipynb
 
 # ============================================
-# Documentation (本地文件不進版控)
+# Documentation (locally generated docs)
 # ============================================
 docs/
 
@@ -72,18 +73,19 @@ derby.log
 *.crc
 
 # ============================================
-# Data Files (所有資料不進版控)
+# Data Files
 # ============================================
 data/
 datamart/
 
 # ============================================
-# Model Bank (所有訓練產出不進版控)
+# Model Bank — all trained artefacts
+# Includes baselines, experiments, monitoring snapshots
 # ============================================
 model_bank/
 
 # ============================================
-# Logs & Reports
+# Logs & Run Output
 # ============================================
 logs/
 *.log
@@ -99,6 +101,9 @@ reports/
 *.key
 secrets/
 credentials/
+
+# Keep pipeline_config.yaml in Git (shared config).
+# Exclude environment-local overrides only:
 config/local.yaml
 config/prod.yaml
 
@@ -136,15 +141,22 @@ coverage.xml
 .cache/
 
 # ============================================
-# Transformation Artifacts (可重新生成)
+# Transformation Artifacts (regenerable)
 # ============================================
 artifacts/
 transformation_artifacts/
 
 # ============================================
-# Large Files (Git LFS 或完全忽略)
+# Large / Binary Files
 # ============================================
 *.zip
 *.tar.gz
 *.7z
 *.rar
+
+# ============================================
+# Docker
+# ============================================
+# Do NOT ignore Dockerfile / .dockerignore — they belong in Git.
+# Ignore any local Docker volume bind-mounts if created under project root.
+docker-data/

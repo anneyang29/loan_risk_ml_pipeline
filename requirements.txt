@@ -1,10 +1,10 @@
 # ============================================
 # ML Pipeline Requirements
 # ============================================
-# Version: 1.1.0
-# Last Updated: 2026-04-12
+# Version: 1.2.0
+# Last Updated: 2026-04-14
 # Python Version: >= 3.9
-# Architecture: Four Phase Training
+# Architecture: Four Phase Training + Challenger + Governance Report
 # ============================================
 
 # --------------------------------------------
@@ -13,7 +13,7 @@
 pyspark>=3.4.0
 pandas>=2.0.0
 numpy>=1.24.0
-pyarrow>=12.0.0
+pyarrow>=12.0.0          # parquet read/write (gold OOT, bronze/silver/gold layers)
 
 # --------------------------------------------
 # Machine Learning
@@ -23,8 +23,7 @@ xgboost>=2.0.0
 scipy>=1.11.0
 
 # --------------------------------------------
-# Imbalanced Learning (for SMOTE / undersample)
-# 若 imbalance_strategy="smote"，需安裝此套件
+# Imbalanced Learning (SMOTE / undersample)
 # --------------------------------------------
 imbalanced-learn>=0.11.0
 
@@ -39,24 +38,23 @@ python-dateutil>=2.8.2
 pyyaml>=6.0
 
 # --------------------------------------------
-# Excel Support (for reading .xlsx)
+# Excel Support (reading raw .xlsx input)
 # --------------------------------------------
 openpyxl>=3.1.0
 
 # --------------------------------------------
-# Logging & Monitoring (Optional)
+# Visualization — required by final_decision_report.py
 # --------------------------------------------
-# structlog>=23.1.0
+matplotlib>=3.7.0        # all report plots; CJK font config at module import
+seaborn>=0.12.0          # zone outcome heatmap (_plot_zone_outcome_heatmap)
 
 # --------------------------------------------
-# Visualization (Optional)
+# Explainability — required by final_decision_report.py
 # --------------------------------------------
-# matplotlib>=3.7.0
-# seaborn>=0.12.0
-# plotly>=5.15.0
+shap>=0.42.0             # SHAP beeswarm + bar chart in governance report
 
 # --------------------------------------------
-# Jupyter (for notebooks)
+# Jupyter (optional — for exploratory notebooks)
 # --------------------------------------------
 # jupyter>=1.0.0
 # ipykernel>=6.25.0

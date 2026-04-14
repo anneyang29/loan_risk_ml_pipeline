@@ -18,24 +18,34 @@ Baseline lifecycle:
 - Use --create-baseline to manually create a named baseline from the latest run.
 - Challengers compare against the active baseline (dynamic loading, not hardcoded).
 
-Standard full lifecycle (python main.py):
+End-to-end lifecycle (python main.py):
   A. Data Pipeline       Bronze -> Silver -> Gold
   B. Baseline Pipeline   Four-phase training + auto-create/activate baseline
   C. Challenger Stage    Run C2 -> Run C3 -> compare each against active baseline
-  D. Decision Summary    challenger_evaluation_summary.{json,md} in model_bank/experiments/
+  D. Final Decision      finalize_model_decision() -> single chosen candidate
+                         build_final_decision_artifacts() -> all plots + reports
+                         Outputs: model_governance_decision_report.md
+                                  final_baseline_decision_summary.json
   E. (optional)          Production Monitoring  [--all only]
 
+Final Decision logic:
+  - If no challenger beats the baseline  -> RETAIN_BASELINE   (baseline is chosen candidate)
+  - If a challenger beats on routing + classifier  -> FULL_UPGRADE
+  - If a challenger improves routing only          -> ROUTING_ONLY_UPGRADE
+  All evidence (confusion matrix, SHAP, zone plots) reflects the chosen candidate.
+
 Usage:
-    python main.py                             # Data + Training + Challenger Evaluation
-    python main.py --all                       # Data + Training + Challengers + Monitoring
-    python main.py --data-only                 # Bronze -> Silver -> Gold only
-    python main.py --train-only                # Four-phase training only
-    python main.py --challengers-only          # Challenger evaluation only (requires baseline)
-    python main.py --monitor-only              # Production monitoring only
-    python main.py --run-c2                    # C2 Feature Pruning challenger (manual)
-    python main.py --run-c3                    # C3 Decision Tuning challenger (manual)
-    python main.py --compare-baseline --challenger c2   # Comparison report only
-    python main.py --compare-baseline --challenger c3   # Comparison report only
+    python main.py                             # A+B+C+D (full lifecycle, no monitoring)
+    python main.py --all                       # A+B+C+D+E (full lifecycle + monitoring)
+    python main.py --data-only                 # A only: Bronze -> Silver -> Gold
+    python main.py --train-only                # B only: four-phase training
+    python main.py --challengers-only          # C+D: challenger eval + final decision report
+    python main.py --monitor-only              # E only: production monitoring
+    python main.py --report-only               # D only: rebuild final decision report from existing artifacts
+    python main.py --run-c2                    # Run C2 Feature Pruning challenger (manual)
+    python main.py --run-c3                    # Run C3 Decision Tuning challenger (manual)
+    python main.py --compare-baseline --challenger c2   # Regenerate C2 comparison report
+    python main.py --compare-baseline --challenger c3   # Regenerate C3 comparison report
     python main.py --create-baseline                    # Create baseline from latest run
     python main.py --create-baseline --baseline-name v2 # Name the new baseline
     python main.py --lower-threshold 0.3       # Custom threshold (fallback)
@@ -69,6 +79,11 @@ from utils.challenger_manager import (
     run_c2_feature_pruning_challenger,
     run_c3_decision_tuning_challenger,
     compare_against_baseline,
+)
+from utils.final_decision_report import (
+    run_final_decision_report,
+    finalize_model_decision,
+    build_final_decision_artifacts,
 )
 
 # 設定 logging
@@ -518,18 +533,20 @@ def run_monitoring_pipeline(
 
 def run_challenger_evaluation_pipeline(project_root: Path = None) -> dict:
     """
-    Run the full challenger evaluation stage (C2 + C3) against the active baseline.
+    Run the full challenger evaluation stage (C2 + C3) and produce the
+    integrated final decision report.
 
     Steps:
-      1. Verify an active baseline exists — abort with a clear message if not.
-      2. Run C2 Feature Pruning challenger.
-      3. Run C3 Decision Tuning challenger.
-      4. Build a structured evaluation summary.
-      5. Write challenger_evaluation_summary.json and .md to
-         model_bank/experiments/.
+      C1. Verify an active baseline exists — abort with a clear message if not.
+      C2. Run C2 Feature Pruning challenger.
+      C3. Run C3 Decision Tuning challenger.
+      C4. Build challenger evaluation summary (challenger_evaluation_summary.{json,md}).
+      D.  Call finalize_model_decision() -> FinalDecision (single chosen candidate).
+          Call build_final_decision_artifacts() -> all plots, report, JSON summary.
 
     Returns a dict with keys:
-      active_baseline, c2, c3, overall_recommendation, summary_path
+      active_baseline, c2, c3, overall_recommendation, summary_path,
+      report_path, json_summary_path, plots_dir, decision_type, chosen_candidate
     """
     import json
     from utils.challenger_manager import load_active_baseline_metrics
@@ -627,73 +644,48 @@ def run_challenger_evaluation_pipeline(project_root: Path = None) -> dict:
     experiments_dir = project_root / "model_bank" / "experiments"
     experiments_dir.mkdir(parents=True, exist_ok=True)
     json_path = experiments_dir / "challenger_evaluation_summary.json"
-    md_path   = experiments_dir / "challenger_evaluation_summary.md"
 
     json_path.write_text(
         json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
-    _write_evaluation_summary_md(summary, md_path)
-
-    print(f"\n  Summary JSON : {json_path}")
-    print(f"  Summary MD   : {md_path}")
-    print(f"\n  Overall      : {overall}")
+    print(f"\n  Internal JSON: {json_path}")
+    print(f"  Overall      : {overall}")
     print("\n" + "=" * 70)
     print("  Challenger Evaluation complete.")
     print("=" * 70)
 
-    return {**summary, "summary_path": str(json_path)}
+    result = {**summary, "summary_path": str(json_path)}
+
+    # Stage D: Resolve final decision and build all integrated artifacts
+    print("\n" + "-" * 70)
+    print("  Stage D: Final Decision + Integrated Report")
+    print("-" * 70)
+    try:
+        decision = finalize_model_decision(project_root=project_root)
+        if decision is not None and decision.holdout_csv is not None:
+            print(f"  Chosen candidate : {decision.chosen_candidate_label}")
+            print(f"  Decision type    : {decision.decision_type}")
+            report_result = build_final_decision_artifacts(
+                decision=decision,
+                project_root=project_root,
+            )
+            result["report_path"]       = report_result.get("report_path", "")
+            result["json_summary_path"] = report_result.get("json_summary_path", "")
+            result["plots_dir"]         = report_result.get("plots_dir", "")
+            result["decision_type"]     = report_result.get("decision_type", "")
+            result["chosen_candidate"]  = report_result.get("chosen_candidate", "")
+            print(f"\n  Final report     : {result['report_path']}")
+            print(f"  Decision JSON    : {result['json_summary_path']}")
+            print(f"  Plots            : {result['plots_dir']}")
+        else:
+            logger.warning("finalize_model_decision returned no result; skipping artifact build.")
+    except Exception as exc:
+        logger.error("Final decision report failed: %s", exc)
+
+    return result
 
 
-def _write_evaluation_summary_md(summary: dict, path: Path):
-    """Write challenger_evaluation_summary.md."""
-
-    def _status_icon(st: str) -> str:
-        return {"full_upgrade": "FULL UPGRADE",
-                "routing_only_upgrade": "ROUTING UPGRADE",
-                "reject": "REJECT"}.get(st, st.upper())
-
-    c2 = summary.get("c2_feature_pruning", {})
-    c3 = summary.get("c3_decision_tuning", {})
-
-    lines = [
-        "# Challenger Evaluation Summary",
-        "",
-        f"> Generated: {summary.get('generated_at', '')[:19]}  ",
-        f"> Active baseline: **{summary.get('active_baseline', '')}**  ",
-        f"> Baseline AUC: {summary.get('baseline_auc', 0):.4f}  |  "
-        f"Baseline F1_reject: {summary.get('baseline_f1_reject', 0):.4f}",
-        "",
-        "---",
-        "",
-        "## Challenger Results",
-        "",
-        "| Challenger | Decision | Reason |",
-        "|---|---|---|",
-        f"| C2 Feature Pruning | **{_status_icon(c2.get('upgrade_candidate', ''))}** "
-        f"| {c2.get('upgrade_reason', '')} |",
-        f"| C3 Decision Tuning | **{_status_icon(c3.get('upgrade_candidate', ''))}** "
-        f"| {c3.get('upgrade_reason', '')} |",
-        "",
-        "---",
-        "",
-        "## Overall Recommendation",
-        "",
-        f"> **{summary.get('overall_recommendation', '')}**",
-        "",
-        "---",
-        "",
-        "## Output Locations",
-        "",
-        f"- C2: `{c2.get('output_dir', '')}`",
-        f"- C3: `{c3.get('output_dir', '')}`",
-        "",
-        "---",
-        "",
-        "*Auto-generated by run_challenger_evaluation_pipeline(). "
-        "No baseline has been replaced — promotion requires an explicit --create-baseline call.*",
-    ]
-    path.write_text("\n".join(lines), encoding="utf-8")
 
 
 # ============================================
@@ -710,19 +702,25 @@ def run_full_pipeline(
     include_monitoring: bool = False,
 ):
     """
-    Run the full pipeline.
+    Run the full end-to-end pipeline.
 
     Stage A  Data processing (Bronze -> Silver -> Gold)
     Stage B  Four-phase training + auto-create/activate baseline
     Stage C  Challenger evaluation: C2 + C3 vs active baseline  [include_challengers=True]
-    Stage D  Decision summary artifact written to model_bank/experiments/
+    Stage D  Final Decision: finalize_model_decision() + build_final_decision_artifacts()
+             Outputs: model_governance_decision_report.md
+                      final_baseline_decision_summary.json
+                      plots/ (confusion matrix, zone charts, SHAP)
     Stage E  Production monitoring                               [include_monitoring=True]
+
+    The final chosen candidate (baseline or best challenger) drives all of Stage D —
+    the report, plots, and JSON summary all reflect the same chosen model.
 
     Args:
         lower_threshold:      Fallback threshold; Phase 3 recommended value takes priority.
         upper_threshold:      Fallback threshold; Phase 3 recommended value takes priority.
-        include_challengers:  Run C2 + C3 challenger evaluation stage (default True).
-        include_monitoring:   Run production monitoring after challengers (default False).
+        include_challengers:  Run C2 + C3 challenger evaluation + final decision (default True).
+        include_monitoring:   Run production monitoring after Stage D (default False).
     """
     if project_root is None:
         project_root = PROJECT_ROOT
@@ -730,9 +728,9 @@ def run_full_pipeline(
     print("\n" + "=" * 80)
     print("  ML PIPELINE - Full Run")
     print("  Four Phase Training Architecture")
-    stages = ["Data", "Training", "Challenger Evaluation"]
+    stages = ["A: Data", "B: Training", "C+D: Challengers + Final Decision"]
     if include_monitoring:
-        stages.append("Monitoring")
+        stages.append("E: Monitoring")
     print(f"  Stages: {' -> '.join(stages)}")
     print("=" * 80)
 
@@ -772,6 +770,11 @@ def run_full_pipeline(
     print("\n" + "=" * 80)
     print("  Full pipeline complete.")
     print(f"  Stages completed: {' -> '.join(stages)}")
+    if challenger_summary:
+        chosen = challenger_summary.get("chosen_candidate", "")
+        dtype  = challenger_summary.get("decision_type", "")
+        if chosen:
+            print(f"  Final Decision   : {dtype} — {chosen}")
     print("=" * 80)
 
     return {
@@ -791,12 +794,13 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python main.py                              # Data + Training + Challenger Evaluation (default)
-  python main.py --all                        # Data + Training + Challengers + Monitoring
-  python main.py --data-only                  # Data processing only
-  python main.py --train-only                 # Training only (requires Gold data)
-  python main.py --challengers-only           # Challenger evaluation only (requires baseline)
-  python main.py --monitor-only               # Production monitoring only
+  python main.py                              # A+B+C+D: Data + Training + Challengers + Final Decision (default)
+  python main.py --all                        # A+B+C+D+E: Full lifecycle + Monitoring
+  python main.py --data-only                  # A only: Data processing (Bronze -> Silver -> Gold)
+  python main.py --train-only                 # B only: Training only (requires Gold data)
+  python main.py --challengers-only           # C+D: Challenger evaluation + Final Decision Report
+  python main.py --monitor-only               # E only: Production monitoring
+  python main.py --report-only                # D only: Rebuild final decision report from existing artifacts
   python main.py --run-c2                     # Run C2 Feature Pruning challenger (manual)
   python main.py --run-c3                     # Run C3 Decision Tuning challenger (manual)
   python main.py --compare-baseline --challenger c2   # Regenerate C2 comparison report
@@ -822,7 +826,7 @@ Examples:
     mode_group.add_argument(
         "--challengers-only",
         action="store_true",
-        help="Run challenger evaluation only: C2 + C3 vs active baseline (requires baseline)",
+        help="Run C2 + C3 challenger evaluation and rebuild all final decision artifacts (requires baseline)",
     )
     mode_group.add_argument(
         "--monitor-only",
@@ -853,6 +857,11 @@ Examples:
         "--create-baseline",
         action="store_true",
         help="Create and activate a baseline from the latest training run",
+    )
+    mode_group.add_argument(
+        "--report-only",
+        action="store_true",
+        help="Rebuild the final integrated decision report only (requires challenger evaluation to have run)",
     )
 
     # Challenger selection (used with --compare-baseline)
@@ -925,7 +934,16 @@ Examples:
         )
 
     elif args.challengers_only:
-        run_challenger_evaluation_pipeline(project_root=PROJECT_ROOT)
+        result = run_challenger_evaluation_pipeline(project_root=PROJECT_ROOT)
+        if result:
+            print(f"\n  Challengers + Final Decision complete.")
+            print(f"  Evaluation JSON  : {result.get('summary_path', '')}")
+            print(f"  Decision type    : {result.get('decision_type', '')}")
+            print(f"  Chosen candidate : {result.get('chosen_candidate', '')}")
+            if result.get("report_path"):
+                print(f"  Report           : {result['report_path']}")
+            if result.get("json_summary_path"):
+                print(f"  Decision JSON    : {result['json_summary_path']}")
 
     elif args.monitor_only:
         run_monitoring_pipeline(
@@ -1060,6 +1078,15 @@ Examples:
         if name:
             print(f"\nBaseline '{name}' is now active.")
             print("Future challengers will compare against this baseline.")
+
+    elif args.report_only:
+        result = run_final_decision_report(project_root=PROJECT_ROOT)
+        if result:
+            print(f"\n  Decision type    : {result.get('decision_type', '')}")
+            print(f"  Chosen candidate : {result.get('chosen_candidate', '')}")
+            print(f"  Report           : {result.get('report_path', '')}")
+            print(f"  Decision JSON    : {result.get('json_summary_path', '')}")
+            print(f"  Plots            : {result.get('plots_dir', '')}")
 
     else:
         # Default: Data + Training + Challenger Evaluation (no monitoring)
