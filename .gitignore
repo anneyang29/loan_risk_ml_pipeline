@@ -55,9 +55,8 @@ conda-env/
 .ipynb_checkpoints/
 *.ipynb_checkpoints/
 
-# Notebook output files (keep .ipynb source if desired;
-# uncomment below to exclude notebooks entirely)
-# *.ipynb
+# Notebook 檔案不進版控
+*.ipynb
 
 # ============================================
 # Documentation (locally generated docs)
